@@ -5,6 +5,7 @@ mod config;
 mod journal;
 mod mdns;
 mod pare_feu;
+mod plage_pages;
 mod printer;
 mod reseau_utils;
 mod session;
@@ -12,6 +13,7 @@ mod theme;
 mod web;
 
 fn main() -> eframe::Result<()> {
+    printer::nettoyer_processus_office();
     let icone = theme::charger_icone_fenetre();
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size([1040.0, 760.0])
@@ -30,3 +32,4 @@ fn main() -> eframe::Result<()> {
         Box::new(|cc| Ok(Box::new(app::App::new(cc)))),
     )
 }
+

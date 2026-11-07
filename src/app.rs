@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use eframe::egui;
 use mdns_sd::ServiceDaemon;
@@ -9,6 +9,7 @@ use mdns_sd::ServiceDaemon;
 use crate::journal::{Entree, Journal, Statut};
 use crate::mdns;
 use crate::pare_feu;
+use crate::plage_pages::{formater_pages, ModePages, SelectionPages};
 use crate::printer;
 use crate::reseau_utils;
 use crate::session::{ModeCouleur, Session};
@@ -20,7 +21,13 @@ pub struct App {
     journal: Arc<Mutex<Journal>>,
     imprimantes: Vec<String>,
     fichiers_choisis: Vec<PathBuf>,
+    selection_locale: SelectionPages,
+    popup_selection_ouverte: bool,
+    popup_cible: Option<PathBuf>,
+    popup_total: u32,
+    popup_cochees: Vec<u32>,
     message_statut: String,
+    etat_pare_feu: String,
     rx_web: Option<Receiver<()>>,
     serveur_demarre: bool,
     ip_locale: String,
@@ -29,7 +36,6 @@ pub struct App {
     icone_soleil: Option<egui::TextureHandle>,
     icone_lune: Option<egui::TextureHandle>,
     icone_popup: Option<egui::TextureHandle>,
-    copie_recente: Option<Instant>,
     daemon_mdns: Option<ServiceDaemon>,
     montrer_qr: bool,
     qr_texture: Option<egui::TextureHandle>,
@@ -56,7 +62,13 @@ impl App {
             journal,
             imprimantes,
             fichiers_choisis: Vec::new(),
+            selection_locale: SelectionPages::default(),
+            popup_selection_ouverte: false,
+            popup_cible: None,
+            popup_total: 0,
+            popup_cochees: Vec::new(),
             message_statut: String::new(),
+            etat_pare_feu: String::new(),
             rx_web: None,
             serveur_demarre: false,
             ip_locale,
@@ -65,12 +77,12 @@ impl App {
             icone_soleil,
             icone_lune,
             icone_popup,
-            copie_recente: None,
             daemon_mdns: None,
             montrer_qr: false,
             qr_texture: None,
             qr_adresse: String::new(),
         };
+        app.reanalyser_entrees_anciennes();
         app.demarrer_serveur();
         app
     }
@@ -138,27 +150,169 @@ impl App {
                     self.ip_locale = reseau_utils::adresse_ip_locale();
                     self.session.port = port_reel;
                     self.session.sauvegarder();
-                    let _ = pare_feu::assurer_regle();
+                    match pare_feu::assurer_regle() {
+                        Ok(_) => { self.etat_pare_feu = "Pare-feu configuré".into(); }
+                        Err(e) => { self.etat_pare_feu = format!("Pare-feu : {}", e); }
+                    }
                     self.daemon_mdns = mdns::publier(port_reel);
                     self.message_statut = format!("Serveur prêt sur le port {}.", port_reel);
                     return;
                 }
-                Err(_) => {
-                    port_essaye = port_essaye.saturating_add(1);
-                }
+                Err(_) => { port_essaye = port_essaye.saturating_add(1); }
             }
         }
         self.message_statut = "Aucun port disponible.".into();
+    }
+
+    fn reparer_reseau(&mut self) {
+        pare_feu::supprimer_toutes_regles();
+        match pare_feu::assurer_regle() {
+            Ok(_) => {
+                self.ip_locale = reseau_utils::adresse_ip_locale();
+                self.qr_texture = None;
+                self.qr_adresse.clear();
+                self.etat_pare_feu = "Pare-feu reconfiguré".into();
+                self.message_statut = format!(
+                    "Accès réseau réparé : http://{}:{}",
+                    self.ip_locale, self.port_effectif
+                );
+            }
+            Err(e) => {
+                self.etat_pare_feu = format!("Pare-feu : {}", e);
+                self.message_statut = format!("Réparation échouée : {}", e);
+            }
+        }
     }
 
     fn rafraichir_imprimantes(&mut self) {
         self.imprimantes = printer::lister_imprimantes();
     }
 
+    fn reanalyser_entrees_anciennes(&mut self) {
+        let documents = {
+            let mut journal = self.journal.lock().unwrap();
+            let mut documents = Vec::new();
+            for entree in journal.entrees.iter_mut() {
+                if entree.statut == Statut::EnAttente
+                    && entree.version_analyse < crate::journal::VERSION_ANALYSE_PAGES
+                {
+                    let chemin = PathBuf::from(&entree.message);
+                    entree.pages = 0;
+                    entree.pages_reelles = 0;
+                    entree.erreur_pages = None;
+                    documents.push((entree.id.clone(), chemin));
+                }
+            }
+            journal.sauvegarder();
+            documents
+        };
+
+        let imprimante = self.session.nom_imprimante.clone();
+        for (id, chemin) in documents {
+            let journal_bg = self.journal.clone();
+            let imprimante_bg = imprimante.clone();
+            std::thread::spawn(move || {
+                let resultat = printer::compter_pages_document(&chemin, &imprimante_bg);
+                if let Ok(mut journal) = journal_bg.lock() {
+                    if let Some(entree) = journal.entrees.iter_mut().find(|e| e.id == id) {
+                        match resultat {
+                            Ok(pages) => {
+                                entree.pages = pages;
+                                entree.pages_reelles = pages;
+                                entree.erreur_pages = None;
+                            }
+                            Err(erreur) => {
+                                entree.pages = 0;
+                                entree.pages_reelles = 0;
+                                entree.erreur_pages = Some(erreur);
+                            }
+                        }
+                        entree.version_analyse = crate::journal::VERSION_ANALYSE_PAGES;
+                    }
+                    journal.sauvegarder();
+                }
+            });
+        }
+    }
+
     fn ajouter_fichier(&mut self, chemin: PathBuf) {
         if !self.fichiers_choisis.contains(&chemin) {
             self.fichiers_choisis.push(chemin);
         }
+    }
+
+
+    fn ouvrir_popup_selection(&mut self, chemin: PathBuf) {
+        let nom_fichier = chemin
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default();
+
+        let existant = {
+            let j = self.journal.lock().unwrap();
+            j.entrees
+                .iter()
+                .find(|e| e.nom_fichier == nom_fichier && (e.message == chemin.to_string_lossy() || PathBuf::from(&e.message).exists()))
+                .cloned()
+        };
+
+        let id;
+        match existant {
+            Some(e) => { id = e.id.clone(); }
+            None => {
+                id = uuid::Uuid::new_v4().to_string();
+                let mut j = self.journal.lock().unwrap();
+                j.ajouter(Entree {
+                    id: id.clone(),
+                    expediteur: self.session.nom_utilisateur.clone(),
+                    nom_fichier: nom_fichier.clone(),
+                    pages: 0,
+                    pages_reelles: 0,
+                    erreur_pages: None,
+                    version_analyse: 0,
+                    horodatage: chrono::Local::now(),
+                    statut: Statut::EnAttente,
+                    message: chemin.to_string_lossy().to_string(),
+                    selection: SelectionPages::default(),
+                });
+            }
+        }
+
+        let journal_bg = self.journal.clone();
+        let id_bg = id.clone();
+        let chemin_bg = chemin.clone();
+        let imp_bg = self.session.nom_imprimante.clone();
+        std::thread::spawn(move || {
+            let resultat = printer::compter_pages_document(&chemin_bg, &imp_bg);
+            if let Ok(mut j) = journal_bg.lock() {
+                if let Some(e) = j.entrees.iter_mut().find(|e| e.id == id_bg) {
+                    match resultat {
+                        Ok(pages) => {
+                            e.pages = pages;
+                            e.pages_reelles = pages;
+                            e.erreur_pages = None;
+                        }
+                        Err(erreur) => {
+                            e.pages = 0;
+                            e.pages_reelles = 0;
+                            e.erreur_pages = Some(erreur);
+                        }
+                    }
+                    e.version_analyse = crate::journal::VERSION_ANALYSE_PAGES;
+                }
+                j.sauvegarder();
+            }
+        });
+
+        self.popup_cible = Some(chemin.clone());
+        self.popup_cochees = if self.selection_locale.mode == ModePages::Personnalise {
+            self.selection_locale.pages_cochees.clone()
+        } else {
+            Vec::new()
+        };
+        self.popup_total = 0;
+        self.message_statut = format!("Analyse du document « {} » en cours…", nom_fichier);
+        self.popup_selection_ouverte = true;
     }
 
     fn imprimer_choisis(&mut self) {
@@ -173,27 +327,59 @@ impl App {
         }
         let nom = self.session.nom_utilisateur.clone();
         for chemin in self.fichiers_choisis.clone() {
-            let pages = printer::compter_pages_pdf(&chemin);
+            let id = uuid::Uuid::new_v4().to_string();
+            let selection = SelectionPages {
+                mode: self.selection_locale.mode.clone(),
+                pages_cochees: self.selection_locale.pages_cochees.clone(),
+                copies: self.selection_locale.copies_effectives(),
+            };
             let nom_fichier = chemin
                 .file_name()
                 .map(|s| s.to_string_lossy().to_string())
                 .unwrap_or_default();
-            let id = uuid::Uuid::new_v4().to_string();
             {
                 let mut j = self.journal.lock().unwrap();
                 j.ajouter(Entree {
-                    id,
+                    id: id.clone(),
                     expediteur: nom.clone(),
                     nom_fichier,
-                    pages,
+                    pages: 0,
+                    pages_reelles: 0,
+                    erreur_pages: None,
+                    version_analyse: 0,
                     horodatage: chrono::Local::now(),
                     statut: Statut::EnAttente,
                     message: chemin.to_string_lossy().to_string(),
+                    selection,
                 });
             }
+            let journal_bg = self.journal.clone();
+            let chemin_bg = chemin.clone();
+            let imp_bg = imprimante.clone();
+            let id_bg = id.clone();
+            std::thread::spawn(move || {
+                let resultat = printer::compter_pages_document(&chemin_bg, &imp_bg);
+                if let Ok(mut j) = journal_bg.lock() {
+                    if let Some(e) = j.entrees.iter_mut().find(|e| e.id == id_bg) {
+                        match resultat {
+                            Ok(pages) => {
+                                e.pages = pages;
+                                e.pages_reelles = pages;
+                                e.erreur_pages = None;
+                            }
+                            Err(erreur) => {
+                                e.pages = 0;
+                                e.pages_reelles = 0;
+                                e.erreur_pages = Some(erreur);
+                            }
+                        }
+                        e.version_analyse = crate::journal::VERSION_ANALYSE_PAGES;
+                    }
+                    j.sauvegarder();
+                }
+            });
         }
         self.fichiers_choisis.clear();
-        self.imprimer_file();
     }
 
     fn imprimer_file(&mut self) {
@@ -215,6 +401,8 @@ impl App {
             self.message_statut = "Aucun document en attente.".into();
             return;
         }
+        let mut impression_lancee = false;
+        let mut message_analyse = None;
         for e in a_imprimer {
             let chemin = PathBuf::from(&e.message);
             if !chemin.exists() {
@@ -222,9 +410,37 @@ impl App {
                 j.mettre_a_jour_statut(&e.id, Statut::Erreur, "Fichier absent".into());
                 continue;
             }
-            printer::imprimer_fichier(&imprimante, &chemin, e.id.clone(), self.journal.clone(), mode);
+            if e.pages_reelles == 0 {
+                message_analyse = Some(e.erreur_pages.clone().unwrap_or_else(|| {
+                    format!("Le calcul des pages de « {} » est encore en cours.", e.nom_fichier)
+                }));
+                continue;
+            }
+            let total_pages = e.pages_reelles;
+            let spec = match e.selection.spec_imprimante(total_pages) {
+                Ok(s) => s,
+                Err(err) => {
+                    let mut j = self.journal.lock().unwrap();
+                    j.mettre_a_jour_statut(&e.id, Statut::Erreur, err);
+                    continue;
+                }
+            };
+            printer::imprimer_fichier(
+                &imprimante,
+                &chemin,
+                e.id.clone(),
+                self.journal.clone(),
+                mode,
+                spec,
+                e.selection.copies_effectives(),
+            );
+            impression_lancee = true;
         }
-        self.message_statut = "Impression lancée.".into();
+        self.message_statut = if impression_lancee {
+            "Impression lancée.".into()
+        } else {
+            message_analyse.unwrap_or_else(|| "Aucun document n'a pu être lancé.".into())
+        };
     }
 
     fn supprimer_entree(&mut self, id: &str) {
@@ -249,6 +465,12 @@ impl App {
     }
 
     fn assurer_qr(&mut self, ctx: &egui::Context) {
+        let ip_fraiche = reseau_utils::adresse_ip_locale();
+        if ip_fraiche != self.ip_locale {
+            self.ip_locale = ip_fraiche;
+            self.qr_texture = None;
+            self.qr_adresse.clear();
+        }
         let adresse = format!("http://{}:{}", self.ip_locale, self.port_effectif);
         if self.qr_adresse == adresse && self.qr_texture.is_some() {
             return;
@@ -287,30 +509,24 @@ impl App {
                 }
             });
         });
-        if basculer {
-            self.basculer_theme(ctx);
-        }
-        if ouvrir_qr {
-            self.montrer_qr = !self.montrer_qr;
-        }
+        if basculer { self.basculer_theme(ctx); }
+        if ouvrir_qr { self.montrer_qr = !self.montrer_qr; }
     }
 
     fn ui_qr_popup(&mut self, ctx: &egui::Context) {
-        if !self.montrer_qr {
-            return;
-        }
-        if !self.serveur_demarre {
-            self.montrer_qr = false;
-            return;
-        }
+        if !self.montrer_qr { return; }
+        if !self.serveur_demarre { self.montrer_qr = false; return; }
         self.assurer_qr(ctx);
 
         let texte = self.couleur_texte();
+        let texte_doux = self.couleur_texte_doux();
         let carte = self.couleur_carte();
         let bordure = self.couleur_bordure();
         let accent_fonce = self.couleur_accent_fonce();
         let ip = self.ip_locale.clone();
         let port = self.port_effectif;
+        let etat_pf = self.etat_pare_feu.clone();
+        let mut reparer = false;
 
         let mut ouvert = self.montrer_qr;
         egui::Window::new("Partage d'accès")
@@ -326,24 +542,14 @@ impl App {
             )
             .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
             .show(ctx, |ui| {
-                ui.set_min_width(340.0);
+                ui.set_min_width(360.0);
                 ui.vertical_centered(|ui| {
-                    ui.label(
-                        egui::RichText::new("Scanner ici")
-                            .size(18.0)
-                            .strong()
-                            .color(texte),
-                    );
+                    ui.label(egui::RichText::new("Scanner ici").size(18.0).strong().color(texte));
                     ui.add_space(16.0);
-
                     if let Some(tex) = &self.qr_texture {
                         let taille = egui::vec2(240.0, 240.0);
                         let (rect, _) = ui.allocate_exact_size(taille, egui::Sense::hover());
-                        ui.painter().rect_filled(
-                            rect,
-                            egui::Rounding::same(10.0),
-                            egui::Color32::WHITE,
-                        );
+                        ui.painter().rect_filled(rect, egui::Rounding::same(10.0), egui::Color32::WHITE);
                         let marge = 10.0;
                         let rect_img = egui::Rect::from_min_size(
                             rect.min + egui::vec2(marge, marge),
@@ -358,9 +564,7 @@ impl App {
                     } else {
                         ui.label(egui::RichText::new("QR code indisponible").color(texte));
                     }
-
                     ui.add_space(18.0);
-
                     let url_ip = format!("{}:{}", ip, port);
                     egui::Frame::none()
                         .fill(accent_fonce)
@@ -376,24 +580,18 @@ impl App {
                                 );
                             });
                         });
-
                     if self.daemon_mdns.is_some() {
                         ui.add_space(10.0);
                         let largeur_totale = 340.0;
                         let largeur_lien = largeur_totale * 0.75;
                         let largeur_bouton = largeur_totale * 0.25;
-
                         ui.horizontal(|ui| {
                             ui.allocate_ui_with_layout(
                                 egui::vec2(largeur_lien, 32.0),
                                 egui::Layout::left_to_right(egui::Align::Center),
                                 |ui| {
                                     let texte_lien = format!("omniprint.local:{}", port);
-                                    ui.label(
-                                        egui::RichText::new(&texte_lien)
-                                            .size(14.0)
-                                            .color(accent_fonce),
-                                    );
+                                    ui.label(egui::RichText::new(&texte_lien).size(14.0).color(accent_fonce));
                                 },
                             );
                             ui.allocate_ui_with_layout(
@@ -401,16 +599,23 @@ impl App {
                                 egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
                                 |ui| {
                                     if ui.button("Copier").clicked() {
-                                        let url = format!("http://omniprint.local:{}", port);
+                                        let url = format!("http://omniprint.local:{}/", port);
                                         ui.output_mut(|o| o.copied_text = url);
                                     }
                                 },
                             );
                         });
                     }
+                    ui.add_space(14.0);
+                    ui.label(egui::RichText::new(&etat_pf).size(11.0).color(texte_doux));
+                    ui.add_space(6.0);
+                    if ui.button("Réparer l'accès réseau").clicked() {
+                        reparer = true;
+                    }
                 });
             });
         self.montrer_qr = ouvert;
+        if reparer { self.reparer_reseau(); }
     }
 
     fn ui_imprimante(&mut self, ui: &mut egui::Ui) {
@@ -495,6 +700,219 @@ impl App {
         });
     }
 
+    fn ui_selection_pages(&mut self, ui: &mut egui::Ui) {
+        let texte_doux = self.couleur_texte_doux();
+        let accent_fonce = self.couleur_accent_fonce();
+        let accent = self.couleur_accent();
+
+        ui.label(
+            egui::RichText::new("Pages à imprimer")
+                .size(12.0)
+                .color(texte_doux),
+        );
+        ui.add_space(4.0);
+
+        ui.horizontal(|ui| {
+            let mut nouveau_mode = self.selection_locale.mode.clone();
+            let label_mode = match self.selection_locale.mode {
+                ModePages::Toutes => "Toutes les pages",
+                ModePages::Personnalise => "Sélection par case",
+            };
+            egui::ComboBox::from_id_source("combo_mode_pages")
+                .selected_text(label_mode)
+                .width(220.0)
+                .show_ui(ui, |ui| {
+                    if ui.selectable_label(matches!(nouveau_mode, ModePages::Toutes), "Toutes les pages").clicked() {
+                        nouveau_mode = ModePages::Toutes;
+                    }
+                    if ui.selectable_label(matches!(nouveau_mode, ModePages::Personnalise), "Sélection par case").clicked() {
+                        nouveau_mode = ModePages::Personnalise;
+                    }
+                });
+            if self.selection_locale.mode != nouveau_mode {
+                self.selection_locale.mode = nouveau_mode;
+                if self.selection_locale.mode == ModePages::Toutes {
+                    self.selection_locale.pages_cochees.clear();
+                }
+            }
+
+            if self.selection_locale.mode == ModePages::Personnalise {
+                if ui
+                    .add(
+                        egui::Button::new(
+                            egui::RichText::new("Choisir les pages…").size(13.0).color(egui::Color32::WHITE),
+                        )
+                        .fill(accent_fonce),
+                    )
+                    .clicked()
+                {
+                    let cible = self.fichiers_choisis.first().cloned().or_else(|| {
+                        let j = self.journal.lock().unwrap();
+                        j.entrees
+                            .iter()
+                            .rev()
+                            .find(|e| e.statut == Statut::EnAttente)
+                            .map(|e| PathBuf::from(&e.message))
+                    });
+                    match cible {
+                        Some(c) if c.exists() => self.ouvrir_popup_selection(c),
+                        _ => { self.message_statut = "Ajoutez d'abord un fichier.".into(); }
+                    }
+                }
+            }
+        });
+
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("Copies").size(12.0).color(texte_doux));
+            let mut copies = self.selection_locale.copies_effectives();
+            if ui.add(egui::DragValue::new(&mut copies).range(1..=999)).changed() {
+                self.selection_locale.copies = copies;
+            }
+        });
+
+        let _ = accent;
+    }
+
+    fn ui_popup_selection_pages(&mut self, ctx: &egui::Context) {
+        if !self.popup_selection_ouverte { return; }
+
+        let chemin_opt = self.popup_cible.clone();
+        let (total, pret, erreur_pages) = if let Some(ref cible) = chemin_opt {
+            let j = self.journal.lock().unwrap();
+            match j.entrees.iter().find(|e| e.message == cible.to_string_lossy()) {
+                Some(e) => (e.pages_reelles, e.pages_reelles > 0, e.erreur_pages.clone()),
+                None => (self.popup_total, false, None),
+            }
+        } else {
+            (self.popup_total, false, None)
+        };
+        self.popup_total = total;
+
+        let carte = self.couleur_carte();
+        let bordure = self.couleur_bordure();
+        let accent_fonce = self.couleur_accent_fonce();
+        let texte = self.couleur_texte();
+        let texte_doux = self.couleur_texte_doux();
+        let couleur_erreur = self.couleur_erreur();
+
+        let mut ouvert = self.popup_selection_ouverte;
+        let mut valider = false;
+        let mut annuler = false;
+
+        egui::Window::new("Choisir les pages")
+            .collapsible(false)
+            .resizable(true)
+            .open(&mut ouvert)
+            .frame(
+                egui::Frame::none()
+                    .fill(carte)
+                    .stroke(egui::Stroke::new(1.0_f32, bordure))
+                    .rounding(egui::Rounding::same(14.0))
+                    .inner_margin(egui::Margin::same(20.0)),
+            )
+            .default_width(520.0)
+            .default_height(460.0)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .show(ctx, |ui| {
+                ui.set_min_width(480.0);
+                ui.horizontal(|ui| {
+                    if pret {
+                        ui.label(egui::RichText::new(format!("Document : {} page(s)", total)).size(14.0).color(texte));
+                    } else if let Some(erreur) = erreur_pages.as_ref() {
+                        ui.label(egui::RichText::new(format!("Analyse impossible : {}", erreur)).size(13.0).color(couleur_erreur));
+                    } else {
+                        ui.label(egui::RichText::new("Analyse du document en cours…").size(14.0).color(texte_doux));
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.add_enabled(pret, egui::Button::new("Tout cocher")).clicked() {
+                            self.popup_cochees = (1..=total).collect();
+                        }
+                        if ui.add_enabled(pret, egui::Button::new("Tout décocher")).clicked() {
+                            self.popup_cochees.clear();
+                        }
+                    });
+                });
+                ui.separator();
+                egui::ScrollArea::vertical()
+                    .id_source("popup_pages_scroll")
+                    .max_height(320.0)
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        if !pret {
+                            if let Some(erreur) = erreur_pages.as_ref() {
+                                ui.label(egui::RichText::new(erreur).size(12.0).color(couleur_erreur));
+                            } else {
+                                ui.label(egui::RichText::new("Le nombre de pages est en cours de calcul. La grille s'affichera dès que le document sera analysé.").size(12.0).color(texte_doux));
+                            }
+                        } else {
+                            let par_ligne = 8usize;
+                            let mut i = 1u32;
+                            while i <= total {
+                                ui.horizontal(|ui| {
+                                    for _ in 0..par_ligne {
+                                        if i > total { break; }
+                                        let mut coche = self.popup_cochees.contains(&i);
+                                        if ui.checkbox(&mut coche, format!("{}", i)).changed() {
+                                            if coche {
+                                                if !self.popup_cochees.contains(&i) {
+                                                    self.popup_cochees.push(i);
+                                                }
+                                            } else {
+                                                self.popup_cochees.retain(|p| *p != i);
+                                            }
+                                        }
+                                        i += 1;
+                                    }
+                                });
+                            }
+                        }
+                    });
+                ui.separator();
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "{} page(s) sélectionnée(s) — {}",
+                            self.popup_cochees.len(),
+                            if self.popup_cochees.is_empty() {
+                                "aucune".to_string()
+                            } else {
+                                formater_pages(&self.popup_cochees)
+                            }
+                        ))
+                        .size(12.0)
+                        .color(texte_doux),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .add_enabled(pret && !self.popup_cochees.is_empty(), egui::Button::new(
+                                egui::RichText::new("Valider").size(13.0).color(egui::Color32::WHITE),
+                            ).fill(accent_fonce))
+                            .clicked()
+                        {
+                            valider = true;
+                        }
+                        if ui.button("Annuler").clicked() {
+                            annuler = true;
+                        }
+                    });
+                });
+            });
+
+        if valider {
+            self.selection_locale.mode = ModePages::Personnalise;
+            self.selection_locale.pages_cochees = self.popup_cochees.clone();
+            self.popup_selection_ouverte = false;
+            self.message_statut = format!(
+                "Sélection enregistrée : {} page(s).",
+                self.popup_cochees.len()
+            );
+        }
+        if annuler || !ouvert {
+            self.popup_selection_ouverte = false;
+        }
+    }
+
     fn ui_depot_local(&mut self, ui: &mut egui::Ui) {
         ui.label(
             egui::RichText::new("Déposer un ou plusieurs fichiers depuis cet ordinateur")
@@ -508,7 +926,7 @@ impl App {
                 if let Some(fichiers) = rfd::FileDialog::new()
                     .add_filter(
                         "Documents",
-                        &["pdf", "txt", "png", "jpg", "jpeg", "docx", "xlsx"],
+                        &["pdf", "txt", "png", "jpg", "jpeg", "docx", "doc", "xlsx", "xls", "pptx", "ppt", "odt", "ods", "odp", "rtf"],
                     )
                     .pick_files()
                 {
@@ -520,7 +938,7 @@ impl App {
             if ui
                 .add_enabled(
                     !self.fichiers_choisis.is_empty(),
-                    egui::Button::new("Imprimer la sélection"),
+                    egui::Button::new("Ajouter à la file"),
                 )
                 .clicked()
             {
@@ -533,6 +951,9 @@ impl App {
                 self.fichiers_choisis.clear();
             }
         });
+        ui.add_space(6.0);
+        self.ui_selection_pages(ui);
+        ui.add_space(6.0);
         if !self.fichiers_choisis.is_empty() {
             let texte = self.couleur_texte();
             for (i, f) in self.fichiers_choisis.iter().enumerate() {
@@ -631,9 +1052,7 @@ impl App {
                 if ui
                     .add(
                         egui::Button::new(
-                            egui::RichText::new("Tout imprimer")
-                                .size(13.0)
-                                .color(egui::Color32::WHITE),
+                            egui::RichText::new("Tout imprimer").size(13.0).color(egui::Color32::WHITE),
                         )
                         .fill(accent_fonce),
                     )
@@ -662,10 +1081,10 @@ impl App {
         };
 
         let largeur = ui.available_width();
-        let cols = [0.18, 0.30, 0.08, 0.10, 0.14, 0.20];
+        let cols = [0.16, 0.22, 0.07, 0.22, 0.07, 0.10, 0.16];
         let largeurs: Vec<f32> = cols.iter().map(|c| c * largeur).collect();
 
-        let titres = ["Expéditeur", "Fichier", "Pages", "Heure", "Statut", "Action"];
+        let titres = ["Expéditeur", "Fichier", "Pages", "Sélection", "Copies", "Statut", "Action"];
         Self::ligne_entete(ui, &largeurs, &titres, texte);
         ui.separator();
 
@@ -687,11 +1106,20 @@ impl App {
                             Statut::Imprime => ("imprimé", succes),
                             Statut::Erreur => ("erreur", erreur),
                         };
+                        let total = e.pages_reelles;
+                        let label_pages = if e.pages_reelles > 0 {
+                            format!("{}", total)
+                        } else if e.erreur_pages.is_some() {
+                            "Erreur".to_string()
+                        } else {
+                            "Analyse…".to_string()
+                        };
                         let cellules = vec![
                             (e.expediteur.clone(), texte),
                             (e.nom_fichier.clone(), texte),
-                            (format!("{}", e.pages), texte),
-                            (e.horodatage.format("%H:%M:%S").to_string(), texte_doux),
+                            (label_pages, texte),
+                            (e.selection.resume(total), texte_doux),
+                            (format!("{}", e.selection.copies_effectives()), texte),
                             (txt.to_string(), col),
                             ("Retirer".to_string(), accent),
                         ];
@@ -738,10 +1166,10 @@ impl App {
         };
 
         let largeur = ui.available_width();
-        let cols = [0.14, 0.16, 0.22, 0.07, 0.10, 0.21, 0.10];
+        let cols = [0.11, 0.13, 0.18, 0.06, 0.18, 0.06, 0.09, 0.11, 0.08];
         let largeurs: Vec<f32> = cols.iter().map(|c| c * largeur).collect();
 
-        let titres = ["Date", "Expéditeur", "Fichier", "Pages", "Statut", "Message", "Action"];
+        let titres = ["Date", "Expéditeur", "Fichier", "Pages", "Sélection", "Copies", "Statut", "Message", "Action"];
         Self::ligne_entete(ui, &largeurs, &titres, texte);
         ui.separator();
 
@@ -757,11 +1185,14 @@ impl App {
                     Statut::Erreur => ("erreur", erreur),
                     _ => ("", texte),
                 };
+                let total = if e.pages_reelles > 0 { e.pages_reelles } else { e.pages };
                 let cellules = vec![
                     (e.horodatage.format("%d/%m %H:%M:%S").to_string(), texte_doux),
                     (e.expediteur.clone(), texte),
                     (e.nom_fichier.clone(), texte),
-                    (format!("{}", e.pages), texte),
+                    (format!("{}", total), texte),
+                    (e.selection.resume(total), texte_doux),
+                    (format!("{}", e.selection.copies_effectives()), texte),
                     (txt.to_string(), col),
                     (e.message.clone(), texte_doux),
                     ("Supprimer".to_string(), accent),
@@ -781,11 +1212,6 @@ impl App {
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.traiter_evenements();
-        if let Some(t) = self.copie_recente {
-            if t.elapsed() >= Duration::from_secs(2) {
-                self.copie_recente = None;
-            }
-        }
         let carte = self.couleur_carte();
         let bordure = self.couleur_bordure();
         let fond = self.couleur_fond();
@@ -833,14 +1259,17 @@ impl eframe::App for App {
                     });
             });
         self.ui_qr_popup(ctx);
-        ctx.request_repaint_after(Duration::from_millis(200));
+        self.ui_popup_selection_pages(ctx);
+        ctx.request_repaint_after(Duration::from_millis(250));
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         if let Some(d) = self.daemon_mdns.take() {
             let _ = d.shutdown();
         }
+        printer::nettoyer_processus_office();
         self.session.sauvegarder();
         self.journal.lock().unwrap().sauvegarder();
     }
 }
+

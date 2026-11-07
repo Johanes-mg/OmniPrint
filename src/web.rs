@@ -1,10 +1,13 @@
 use std::path::PathBuf;
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
+use serde::Deserialize;
 use tiny_http::{Header, Method, Response, Server, StatusCode};
 
 use crate::journal::{Entree, Journal, Statut};
+use crate::plage_pages::{ModePages, SelectionPages};
 use crate::session::ModeCouleur;
 
 #[derive(Clone)]
@@ -147,15 +150,19 @@ fn recevoir_document(mut requete: tiny_http::Request, etat: &EtatServeur) -> std
         return repondre_json_statut(requete, 500, &format!("{{\"ok\":false,\"message\":\"Écriture impossible : {}\"}}", echapper_json(&e.to_string())));
     }
 
-    let pages = crate::printer::compter_pages_pdf(&chemin);
+    let selection = SelectionPages::default();
     let entree = Entree {
         id: id.clone(),
         expediteur: if expediteur.trim().is_empty() { "navigateur".into() } else { expediteur },
         nom_fichier: nom_fichier.clone(),
-        pages,
+        pages: 0,
+        pages_reelles: 0,
+        erreur_pages: None,
+        version_analyse: 0,
         horodatage: chrono::Local::now(),
         statut: Statut::EnAttente,
         message: chemin.to_string_lossy().to_string(),
+        selection,
     };
     {
         let mut j = etat.journal.lock().unwrap();
@@ -163,33 +170,111 @@ fn recevoir_document(mut requete: tiny_http::Request, etat: &EtatServeur) -> std
     }
     let _ = etat.tx.send(());
 
+    let journal_bg = etat.journal.clone();
+    let id_bg = id.clone();
+    let chemin_bg = chemin.clone();
+    let imp_bg = etat.imprimante.lock().unwrap().clone();
+    std::thread::spawn(move || {
+        let resultat = crate::printer::compter_pages_document(&chemin_bg, &imp_bg);
+        if let Ok(mut j) = journal_bg.lock() {
+            if let Some(e) = j.entrees.iter_mut().find(|e| e.id == id_bg) {
+                match resultat {
+                    Ok(pages) => {
+                        e.pages = pages;
+                        e.pages_reelles = pages;
+                        e.erreur_pages = None;
+                    }
+                    Err(erreur) => {
+                        e.pages = 0;
+                        e.pages_reelles = 0;
+                        e.erreur_pages = Some(erreur);
+                    }
+                }
+                e.version_analyse = crate::journal::VERSION_ANALYSE_PAGES;
+            }
+            j.sauvegarder();
+        }
+    });
+
     let corps_reponse = format!(
-        "{{\"ok\":true,\"id\":\"{}\",\"pages\":{},\"nom\":\"{}\",\"taille\":{}}}",
-        id, pages, echapper_json(&nom_fichier), contenu.len()
+        "{{\"ok\":true,\"id\":\"{}\",\"pages\":0,\"nom\":\"{}\",\"taille\":{}}}",
+        id, echapper_json(&nom_fichier), contenu.len()
     );
     repondre_json_statut(requete, 200, &corps_reponse)
+}
+
+#[derive(Deserialize)]
+struct RequeteImpression {
+    id: String,
+    mode: String,
+    expediteur: String,
+    pages_mode: String,
+    pages_cochees: Vec<u32>,
+    copies: u32,
+}
+
+fn attendre_pages(
+    journal: &Arc<Mutex<Journal>>,
+    id: &str,
+    timeout: Duration,
+) -> Result<u32, String> {
+    let debut = Instant::now();
+    loop {
+        {
+            let j = journal.lock().unwrap();
+            if let Some(e) = j.entrees.iter().find(|e| e.id == id) {
+                if e.pages_reelles > 0 {
+                    return Ok(e.pages_reelles);
+                }
+                if let Some(erreur) = e.erreur_pages.as_ref() {
+                    return Err(erreur.clone());
+                }
+            } else {
+                return Err("Document introuvable dans la file d'impression.".into());
+            }
+        }
+        if debut.elapsed() > timeout {
+            return Err("Le calcul du nombre de pages n'est pas terminé. Réessayez dans quelques secondes.".into());
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
 }
 
 fn imprimer_maintenant(mut requete: tiny_http::Request, etat: &EtatServeur) -> std::io::Result<()> {
     let mut corps = String::new();
     let _ = lire_corps_texte(&mut requete.as_reader(), &mut corps);
-    let ligne = corps.trim().to_string();
-    let mut morceaux = ligne.splitn(3, '|');
-    let id = morceaux.next().unwrap_or("").to_string();
-    let mode_str = morceaux.next().unwrap_or("couleur");
-    let expediteur = morceaux.next().unwrap_or("").trim().to_string();
-    let mode = if mode_str == "noirblanc" { ModeCouleur::NoirBlanc } else { ModeCouleur::Couleur };
-
-    if id.is_empty() {
+    let requete_json: RequeteImpression = match serde_json::from_str(&corps) {
+        Ok(r) => r,
+        Err(e) => {
+            return repondre_json_statut(
+                requete,
+                400,
+                &format!("{{\"ok\":false,\"message\":\"JSON invalide : {}\"}}", echapper_json(&e.to_string())),
+            );
+        }
+    };
+    if requete_json.id.is_empty() {
         return repondre_json_statut(requete, 400, "{\"ok\":false,\"message\":\"ID manquant\"}");
     }
     let imprimante = etat.imprimante.lock().unwrap().clone();
     if imprimante.is_empty() {
         return repondre_json_statut(requete, 400, "{\"ok\":false,\"message\":\"Aucune imprimante sélectionnée sur le poste hôte\"}");
     }
+
+    let total = match attendre_pages(&etat.journal, &requete_json.id, Duration::from_secs(60)) {
+        Ok(n) => n,
+        Err(erreur) => {
+            return repondre_json_statut(
+                requete,
+                400,
+                &format!("{{\"ok\":false,\"message\":\"{}\"}}", echapper_json(&erreur)),
+            );
+        }
+    };
+
     let entree = {
         let j = etat.journal.lock().unwrap();
-        j.entrees.iter().find(|e| e.id == id).cloned()
+        j.entrees.iter().find(|e| e.id == requete_json.id).cloned()
     };
     match entree {
         Some(e) if e.statut == Statut::EnAttente => {
@@ -199,14 +284,41 @@ fn imprimer_maintenant(mut requete: tiny_http::Request, etat: &EtatServeur) -> s
                 j.mettre_a_jour_statut(&e.id, Statut::Erreur, "Fichier absent".into());
                 return repondre_json_statut(requete, 400, "{\"ok\":false,\"message\":\"Fichier absent sur le poste hôte\"}");
             }
-            if !expediteur.is_empty() {
+            let mode_pages = match requete_json.pages_mode.as_str() {
+                "personnalise" => ModePages::Personnalise,
+                _ => ModePages::Toutes,
+            };
+            let selection = SelectionPages {
+                mode: mode_pages,
+                pages_cochees: requete_json.pages_cochees.clone(),
+                copies: if requete_json.copies == 0 { 1 } else { requete_json.copies },
+            };
+            let spec = match selection.spec_imprimante(total) {
+                Ok(s) => s,
+                Err(err) => {
+                    return repondre_json_statut(requete, 400, &format!("{{\"ok\":false,\"message\":\"{}\"}}", echapper_json(&err)));
+                }
+            };
+            {
                 let mut j = etat.journal.lock().unwrap();
-                if let Some(e2) = j.entrees.iter_mut().find(|e2| e2.id == id) {
-                    e2.expediteur = expediteur;
+                if let Some(e2) = j.entrees.iter_mut().find(|e2| e2.id == e.id) {
+                    if !requete_json.expediteur.is_empty() {
+                        e2.expediteur = requete_json.expediteur.clone();
+                    }
+                    e2.selection = selection.clone();
                 }
                 j.sauvegarder();
             }
-            crate::printer::imprimer_fichier(&imprimante, &chemin, e.id.clone(), etat.journal.clone(), mode);
+            let mode = if requete_json.mode == "noirblanc" { ModeCouleur::NoirBlanc } else { ModeCouleur::Couleur };
+            crate::printer::imprimer_fichier(
+                &imprimante,
+                &chemin,
+                e.id.clone(),
+                etat.journal.clone(),
+                mode,
+                spec,
+                selection.copies_effectives(),
+            );
             repondre_json_statut(requete, 200, "{\"ok\":true,\"message\":\"Impression lancée\"}")
         }
         Some(_) => repondre_json_statut(requete, 400, "{\"ok\":false,\"message\":\"Document déjà traité\"}"),
@@ -245,9 +357,16 @@ fn repondre_statut_doc(requete: tiny_http::Request, etat: &EtatServeur, id: &str
                 Statut::Imprime => "Imprime",
                 Statut::Erreur => "Erreur",
             };
+            let total = e.pages_reelles;
+            let pret = if e.pages_reelles > 0 { "true" } else { "false" };
+            let erreur_pages = e.erreur_pages.as_deref().unwrap_or("");
             let corps = format!(
-                "{{\"ok\":true,\"statut\":\"{}\",\"message\":\"{}\"}}",
-                statut, echapper_json(&e.message)
+                "{{\"ok\":true,\"statut\":\"{}\",\"message\":\"{}\",\"pages\":{},\"pret\":{},\"erreur_pages\":\"{}\"}}",
+                statut,
+                echapper_json(&e.message),
+                total,
+                pret,
+                echapper_json(erreur_pages)
             );
             repondre_json_statut(requete, 200, &corps)
         }
@@ -400,7 +519,7 @@ main { width: 100%; max-width: 720px; margin: 0 auto; text-align: center; }
 .zone .bouton { margin-top: 16px; padding: 10px 20px; border-radius: 8px; background: var(--accent-fonce); color: #fff; border: none; font-size: 14px; cursor: pointer; }
 input[type=file] { display: none; }
 label.champ { display: block; margin-top: 22px; font-size: 13px; color: var(--texte-doux); text-align: left; }
-input[type=text] { width: 100%; padding: 10px 12px; background: var(--carte); color: var(--texte); border: 1px solid var(--bordure); border-radius: 8px; font-size: 14px; margin-top: 6px; text-align: left; }
+input[type=text], input[type=number], select { width: 100%; padding: 10px 12px; background: var(--carte); color: var(--texte); border: 1px solid var(--bordure); border-radius: 8px; font-size: 14px; margin-top: 6px; text-align: left; }
 .mode { margin-top: 18px; text-align: left; }
 .mode .titre { font-size: 13px; color: var(--texte-doux); margin-bottom: 6px; }
 .mode label { display: inline-flex; align-items: center; gap: 6px; margin-right: 16px; font-size: 13px; cursor: pointer; }
@@ -417,8 +536,15 @@ input[type=text] { width: 100%; padding: 10px 12px; background: var(--carte); co
 .item button:disabled { opacity: 0.4; cursor: default; }
 .item button.danger { border-color: var(--erreur); color: var(--erreur); }
 .item button.danger:hover { background: var(--erreur); color: #fff; }
+.pages-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(44px, 1fr)); gap: 6px; margin-top: 8px; max-height: 200px; overflow-y: auto; padding: 6px; background: var(--carte); border: 1px solid var(--bordure); border-radius: 8px; }
+.pages-grid label { display: flex; align-items: center; justify-content: center; padding: 6px 0; background: #1f2433; border: 1px solid var(--bordure); border-radius: 6px; font-size: 12px; cursor: pointer; }
+.pages-grid input { display: none; }
+.pages-grid input:checked + span { color: var(--accent); font-weight: 700; }
+.pages-grid label:has(input:checked) { border-color: var(--accent); background: #1b2030; }
+.ligne-double { display: flex; gap: 12px; }
+.ligne-double > div { flex: 1; }
 footer { margin: 36px auto 0; color: var(--texte-doux); font-size: 12px; text-align: center; max-width: 720px; }
-@media (max-width: 520px) { body { padding: 20px 14px 32px; } .zone { padding: 32px 16px; } }
+@media (max-width: 520px) { body { padding: 20px 14px 32px; } .zone { padding: 32px 16px; } .ligne-double { flex-direction: column; } }
 </style>
 </head>
 <body>
@@ -435,6 +561,23 @@ footer { margin: 36px auto 0; color: var(--texte-doux); font-size: 12px; text-al
   </div>
   <label class="champ" for="nom">Votre nom (facultatif)</label>
   <input type="text" id="nom" placeholder="Johanes-mg" maxlength="60">
+  <div class="ligne-double">
+    <div>
+      <label class="champ" for="pages-mode">Pages à imprimer</label>
+      <select id="pages-mode">
+        <option value="toutes">Toutes les pages</option>
+        <option value="personnalise">Sélection par case</option>
+      </select>
+    </div>
+    <div>
+      <label class="champ" for="copies">Copies</label>
+      <input type="number" id="copies" min="1" max="999" value="1">
+    </div>
+  </div>
+  <div id="bloc-selection" style="display:none; margin-top: 16px;">
+    <div class="champ" id="titre-selection">Sélection par case (analyse du document en cours…)</div>
+    <div class="pages-grid" id="pages-grid"></div>
+  </div>
   <div class="mode">
     <div class="titre">Mode d'impression</div>
     <label><input type="radio" name="mode" value="couleur" checked> Couleur</label>
@@ -451,6 +594,13 @@ footer { margin: 36px auto 0; color: var(--texte-doux); font-size: 12px; text-al
   var input = document.getElementById('fichier');
   var liste = document.getElementById('liste');
   var nom = document.getElementById('nom');
+  var pagesMode = document.getElementById('pages-mode');
+  var blocSelection = document.getElementById('bloc-selection');
+  var pagesGrid = document.getElementById('pages-grid');
+  var titreSelection = document.getElementById('titre-selection');
+  var copies = document.getElementById('copies');
+  var visuelCourant = null;
+  var totalPagesConnues = 0;
 
   function modeChoisi() {
     var r = document.querySelector('input[name="mode"]:checked');
@@ -461,6 +611,44 @@ footer { margin: 36px auto 0; color: var(--texte-doux); font-size: 12px; text-al
     if (o < 1024) return o + ' o';
     if (o < 1048576) return (o / 1024).toFixed(1) + ' Ko';
     return (o / 1048576).toFixed(1) + ' Mo';
+  }
+
+  function construireGrille(total) {
+    if (total <= 0) return;
+    pagesGrid.innerHTML = '';
+    titreSelection.textContent = 'Sélection par case (' + total + ' page(s) disponible(s))';
+    for (var i = 1; i <= total; i++) {
+      var lab = document.createElement('label');
+      var inp = document.createElement('input');
+      inp.type = 'checkbox';
+      inp.value = String(i);
+      var sp = document.createElement('span');
+      sp.textContent = String(i);
+      lab.appendChild(inp);
+      lab.appendChild(sp);
+      pagesGrid.appendChild(lab);
+    }
+  }
+
+  function majModeAffichage() {
+    var m = pagesMode.value;
+    blocSelection.style.display = m === 'personnalise' ? 'block' : 'none';
+    if (m === 'personnalise') {
+      if (totalPagesConnues > 0) {
+        construireGrille(totalPagesConnues);
+      } else {
+        titreSelection.textContent = 'Sélection par case (analyse du document en cours…)';
+      }
+    }
+  }
+
+  function lireCoches() {
+    var arr = [];
+    var inputs = pagesGrid.querySelectorAll('input[type=checkbox]');
+    for (var i = 0; i < inputs.length; i++) {
+      if (inputs[i].checked) arr.push(parseInt(inputs[i].value, 10));
+    }
+    return arr;
   }
 
   function creerItem(fichier) {
@@ -490,7 +678,7 @@ footer { margin: 36px auto 0; color: var(--texte-doux); font-size: 12px; text-al
     item.appendChild(btnImp);
     item.appendChild(btnSup);
     liste.appendChild(item);
-    return { racine: item, etat: etat, btnImp: btnImp, btnSup: btnSup, id: null };
+    return { racine: item, etat: etat, btnImp: btnImp, btnSup: btnSup, id: null, pages: 0, pret: false };
   }
 
   function messageErreur(visuel, txt) {
@@ -511,7 +699,7 @@ footer { margin: 36px auto 0; color: var(--texte-doux); font-size: 12px; text-al
   function suivreStatut(visuel, id) {
     var tentatives = 0;
     function poll() {
-      if (tentatives >= 30) return;
+      if (tentatives >= 120) return;
       tentatives++;
       var xhr = new XMLHttpRequest();
       xhr.open('GET', '/statut-doc?id=' + encodeURIComponent(id), true);
@@ -519,6 +707,23 @@ footer { margin: 36px auto 0; color: var(--texte-doux); font-size: 12px; text-al
         var r = null;
         try { r = JSON.parse(xhr.responseText); } catch (e) {}
         if (r && r.ok) {
+          if (r.erreur_pages) {
+            messageErreur(visuel, r.erreur_pages);
+            visuel.btnImp.disabled = true;
+            visuel.btnImp.textContent = 'Indisponible';
+            return;
+          }
+          if (r.pret === true && typeof r.pages === 'number' && r.pages > 0 && (!visuel.pret || visuel.pages !== r.pages)) {
+            visuel.pages = r.pages;
+            visuel.pret = true;
+            if (visuel === visuelCourant) {
+              totalPagesConnues = r.pages;
+              majModeAffichage();
+            }
+            visuel.etat.className = 'etat etat-ok';
+            visuel.etat.textContent = 'Prêt (' + r.pages + ' page(s))';
+            visuel.btnImp.disabled = false;
+          }
           if (r.statut === 'Imprime') {
             visuel.etat.className = 'etat etat-ok';
             visuel.etat.textContent = 'Imprimé';
@@ -538,12 +743,13 @@ footer { margin: 36px auto 0; color: var(--texte-doux); font-size: 12px; text-al
       xhr.onerror = function () { setTimeout(poll, 1500); };
       xhr.send();
     }
-    setTimeout(poll, 800);
+    setTimeout(poll, 400);
   }
 
   function envoyer(fichier) {
     return new Promise(function (resolve) {
       var visuel = creerItem(fichier);
+      visuelCourant = visuel;
       visuel.btnSup.onclick = function () { supprimer(visuel); };
       var donnees = new FormData();
       donnees.append('expediteur', nom.value || 'navigateur');
@@ -555,19 +761,25 @@ footer { margin: 36px auto 0; color: var(--texte-doux); font-size: 12px; text-al
         try { rep = JSON.parse(xhr.responseText); } catch (e) {}
         if (xhr.status === 200 && rep && rep.ok && rep.id) {
           visuel.id = rep.id;
-          visuel.etat.className = 'etat etat-ok';
-          visuel.etat.textContent = 'Prêt (' + rep.pages + ' page(s))';
-          visuel.btnImp.disabled = false;
+          visuel.etat.className = 'etat';
+          visuel.etat.textContent = 'Analyse du document…';
+          suivreStatut(visuel, rep.id);
           visuel.btnImp.onclick = function () {
             visuel.btnImp.disabled = true;
             visuel.btnImp.textContent = 'Impression...';
             visuel.etat.className = 'etat';
             visuel.etat.textContent = 'Impression en cours...';
-            var modeActuel = modeChoisi();
-            var expediteurActuel = nom.value || 'navigateur';
+            var payload = {
+              id: rep.id,
+              mode: modeChoisi(),
+              expediteur: nom.value || 'navigateur',
+              pages_mode: pagesMode.value,
+              pages_cochees: lireCoches(),
+              copies: parseInt(copies.value, 10) || 1
+            };
             var xhr2 = new XMLHttpRequest();
             xhr2.open('POST', '/imprimer-maintenant', true);
-            xhr2.setRequestHeader('Content-Type', 'text/plain');
+            xhr2.setRequestHeader('Content-Type', 'application/json');
             xhr2.onload = function () {
               var r2 = null;
               try { r2 = JSON.parse(xhr2.responseText); } catch (e) {}
@@ -584,7 +796,7 @@ footer { margin: 36px auto 0; color: var(--texte-doux); font-size: 12px; text-al
               visuel.btnImp.disabled = false;
               messageErreur(visuel, 'Erreur réseau');
             };
-            xhr2.send(rep.id + '|' + modeActuel + '|' + expediteurActuel);
+            xhr2.send(JSON.stringify(payload));
           };
         } else {
           messageErreur(visuel, (rep && rep.message) ? rep.message : ('Échec HTTP ' + xhr.status));
@@ -603,6 +815,9 @@ footer { margin: 36px auto 0; color: var(--texte-doux); font-size: 12px; text-al
       await envoyer(f);
     }
   }
+
+  pagesMode.addEventListener('change', majModeAffichage);
+  majModeAffichage();
 
   zone.addEventListener('click', function () { input.click(); });
   bouton.addEventListener('click', function (e) { e.stopPropagation(); input.click(); });
@@ -624,3 +839,4 @@ footer { margin: 36px auto 0; color: var(--texte-doux); font-size: 12px; text-al
 </body>
 </html>
 "#;
+

@@ -8,18 +8,22 @@ pub fn assurer_regle() -> Result<(), String> {
         .map_err(|e| format!("Chemin de l'executable introuvable : {}", e))?;
     let exe_str = exe.to_string_lossy().to_string();
 
-    if regle_existe() {
+    if regle_valide_pour(&exe_str) {
         return Ok(());
     }
 
+    let _ = supprimer_regles();
+
     if ajouter_regle_directe(&exe_str).is_ok() {
-        return Ok(());
+        if regle_valide_pour(&exe_str) {
+            return Ok(());
+        }
     }
 
     ajouter_regle_uac(&exe_str)
 }
 
-fn regle_existe() -> bool {
+fn regle_valide_pour(exe: &str) -> bool {
     let sortie = Command::new("netsh")
         .args([
             "advfirewall",
@@ -30,7 +34,30 @@ fn regle_existe() -> bool {
         ])
         .creation_flags(CREATE_NO_WINDOW)
         .output();
-    matches!(sortie, Ok(o) if o.status.success())
+    let Ok(o) = sortie else { return false; };
+    if !o.status.success() {
+        return false;
+    }
+    let texte = String::from_utf8_lossy(&o.stdout).to_lowercase();
+    let cible = exe.to_lowercase().replace('/', "\\");
+    texte.contains(&cible)
+}
+
+fn supprimer_regles() -> Result<(), String> {
+    let sortie = Command::new("netsh")
+        .args([
+            "advfirewall",
+            "firewall",
+            "delete",
+            "rule",
+            "name=OmniPrint",
+        ])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output();
+    match sortie {
+        Ok(_) => Ok(()),
+        Err(e) => Err(format!("netsh indisponible : {}", e)),
+    }
 }
 
 fn ajouter_regle_directe(exe: &str) -> Result<(), String> {
@@ -46,7 +73,7 @@ fn ajouter_regle_directe(exe: &str) -> Result<(), String> {
             "action=allow",
             &prog_arg,
             "enable=yes",
-            "profile=private,domain",
+            "profile=private,domain,public",
         ])
         .creation_flags(CREATE_NO_WINDOW)
         .output();
@@ -60,7 +87,7 @@ fn ajouter_regle_directe(exe: &str) -> Result<(), String> {
 fn ajouter_regle_uac(exe: &str) -> Result<(), String> {
     let prog_arg = format!("program=\"{}\"", exe.replace('"', ""));
     let script = format!(
-        "try {{ Start-Process -FilePath 'netsh' -ArgumentList 'advfirewall','firewall','add','rule','name=OmniPrint','dir=in','action=allow','{}','enable=yes','profile=private,domain' -Verb RunAs -Wait -WindowStyle Hidden; exit 0 }} catch {{ Write-Output $_.Exception.Message; exit 1 }}",
+        "try {{ Start-Process -FilePath 'netsh' -ArgumentList 'advfirewall','firewall','add','rule','name=OmniPrint','dir=in','action=allow','{}','enable=yes','profile=private,domain,public' -Verb RunAs -Wait -WindowStyle Hidden; exit 0 }} catch {{ Write-Output $_.Exception.Message; exit 1 }}",
         prog_arg.replace('\'', "''"),
     );
     let sortie = Command::new("powershell")
@@ -76,7 +103,7 @@ fn ajouter_regle_uac(exe: &str) -> Result<(), String> {
         .output();
     match sortie {
         Ok(o) if o.status.success() => {
-            if regle_existe() {
+            if regle_valide_pour(exe) {
                 Ok(())
             } else {
                 Err("Regle non creee apres elevation".into())
@@ -93,3 +120,17 @@ fn ajouter_regle_uac(exe: &str) -> Result<(), String> {
         Err(e) => Err(format!("PowerShell indisponible : {}", e)),
     }
 }
+
+pub fn supprimer_toutes_regles() {
+    let _ = Command::new("netsh")
+        .args([
+            "advfirewall",
+            "firewall",
+            "delete",
+            "rule",
+            "name=OmniPrint",
+        ])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output();
+}
+

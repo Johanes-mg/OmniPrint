@@ -211,3 +211,4 @@ No data is sent outside the local network. Received documents are stored locally
 ## License
 
 This project is released under an open license. See the LICENSE file for details.
+

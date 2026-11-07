@@ -285,3 +285,4 @@ pub fn generer_qr(contenu: &str, taille_pixels: u32) -> Option<egui::ColorImage>
     let _ = taille_pixels;
     Some(image)
 }
+

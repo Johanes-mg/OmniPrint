@@ -2,11 +2,16 @@ use chrono::{DateTime, Local};
 use serde::{Deserialize, Serialize};
 
 use crate::config;
+use crate::plage_pages::SelectionPages;
+
+pub const VERSION_ANALYSE_PAGES: u32 = 2;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum Statut { EnAttente, EnCours, Imprime, Erreur }
 
 impl Default for Statut { fn default() -> Self { Statut::EnAttente } }
+
+fn selection_defaut() -> SelectionPages { SelectionPages::default() }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Entree {
@@ -14,9 +19,17 @@ pub struct Entree {
     pub expediteur: String,
     pub nom_fichier: String,
     pub pages: u32,
+    #[serde(default)]
+    pub pages_reelles: u32,
+    #[serde(default)]
+    pub erreur_pages: Option<String>,
+    #[serde(default)]
+    pub version_analyse: u32,
     pub horodatage: DateTime<Local>,
     pub statut: Statut,
     pub message: String,
+    #[serde(default = "selection_defaut")]
+    pub selection: SelectionPages,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -71,5 +84,14 @@ impl Journal {
         supprime
     }
 
-    pub fn total_pages(&self) -> u64 { self.entrees.iter().map(|e| e.pages as u64).sum() }
+    pub fn total_pages(&self) -> u64 {
+        self.entrees
+            .iter()
+            .map(|e| {
+                let n = if e.pages_reelles > 0 { e.pages_reelles } else { e.pages };
+                (n as u64) * (e.selection.copies_effectives() as u64)
+            })
+            .sum()
+    }
 }
+

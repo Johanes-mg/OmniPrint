@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 pub const APP_NAME: &str = "OmniPrint";
-pub const DEFAULT_PORT: u16 = 47823;
+pub const DEFAULT_PORT: u16 = 7000;
 pub const PORT_RECHERCHE_MAX: u16 = 20;
 
 pub fn dossier_appdata() -> PathBuf {
@@ -29,3 +29,4 @@ pub fn chemin_documents_recus() -> PathBuf {
     let _ = std::fs::create_dir_all(&p);
     p
 }
+

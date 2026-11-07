@@ -63,7 +63,15 @@ impl Session {
     pub fn charger() -> Self {
         let chemin = config::chemin_session();
         match std::fs::read_to_string(&chemin) {
-            Ok(s) => serde_json::from_str(&s).unwrap_or_default(),
+            Ok(s) => {
+                let mut session: Self = serde_json::from_str(&s).unwrap_or_default();
+                // Migrate only the previous built-in default; keep any user-defined port.
+                if session.port == 47823 {
+                    session.port = config::DEFAULT_PORT;
+                    session.sauvegarder();
+                }
+                session
+            }
             Err(_) => Self::default(),
         }
     }
@@ -75,3 +83,4 @@ impl Session {
         }
     }
 }
+
