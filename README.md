@@ -65,7 +65,7 @@ Built entirely in **Rust** with **egui/eframe**, it combines a native desktop ex
 
 ![SHOOT5](captures/omniprint_5.png)
 
-### Light theme
+### Dark mode
 
 ![SHOOT6](captures/omniprint_6.png)
 
