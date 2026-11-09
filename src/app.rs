@@ -325,7 +325,7 @@ impl App {
         }
         let nom = self.session.nom_utilisateur.clone();
         for chemin in self.fichiers_choisis.clone() {
-            let id = uuid::Uuid::new_v4().to_string();
+            let chemin_str = chemin.to_string_lossy().to_string();
             let selection = SelectionPages {
                 mode: self.selection_locale.mode.clone(),
                 pages_cochees: self.selection_locale.pages_cochees.clone(),
@@ -335,47 +335,69 @@ impl App {
                 .file_name()
                 .map(|s| s.to_string_lossy().to_string())
                 .unwrap_or_default();
-            {
+
+            let existant_id = {
+                let j = self.journal.lock().unwrap();
+                j.entrees
+                    .iter()
+                    .find(|e| {
+                        e.message == chemin_str
+                            && matches!(e.statut, Statut::EnAttente | Statut::EnCours)
+                    })
+                    .map(|e| e.id.clone())
+            };
+
+            if let Some(id_existant) = existant_id {
                 let mut j = self.journal.lock().unwrap();
-                j.ajouter(Entree {
-                    id: id.clone(),
-                    expediteur: nom.clone(),
-                    nom_fichier,
-                    pages: 0,
-                    pages_reelles: 0,
-                    erreur_pages: None,
-                    version_analyse: 0,
-                    horodatage: chrono::Local::now(),
-                    statut: Statut::EnAttente,
-                    message: chemin.to_string_lossy().to_string(),
-                    selection,
+                if let Some(e) = j.entrees.iter_mut().find(|x| x.id == id_existant) {
+                    e.selection = selection;
+                    e.expediteur = nom.clone();
+                }
+                j.sauvegarder();
+            } else {
+                let id = uuid::Uuid::new_v4().to_string();
+                {
+                    let mut j = self.journal.lock().unwrap();
+                    j.ajouter(Entree {
+                        id: id.clone(),
+                        expediteur: nom.clone(),
+                        nom_fichier,
+                        pages: 0,
+                        pages_reelles: 0,
+                        erreur_pages: None,
+                        version_analyse: 0,
+                        horodatage: chrono::Local::now(),
+                        statut: Statut::EnAttente,
+                        message: chemin_str,
+                        selection,
+                    });
+                }
+                let journal_bg = self.journal.clone();
+                let chemin_bg = chemin.clone();
+                let imp_bg = imprimante.clone();
+                let id_bg = id.clone();
+                std::thread::spawn(move || {
+                    let resultat = printer::compter_pages_document(&chemin_bg, &imp_bg);
+                    if let Ok(mut j) = journal_bg.lock() {
+                        if let Some(e) = j.entrees.iter_mut().find(|e| e.id == id_bg) {
+                            match resultat {
+                                Ok(pages) => {
+                                    e.pages = pages;
+                                    e.pages_reelles = pages;
+                                    e.erreur_pages = None;
+                                }
+                                Err(erreur) => {
+                                    e.pages = 0;
+                                    e.pages_reelles = 0;
+                                    e.erreur_pages = Some(erreur);
+                                }
+                            }
+                            e.version_analyse = crate::journal::VERSION_ANALYSE_PAGES;
+                        }
+                        j.sauvegarder();
+                    }
                 });
             }
-            let journal_bg = self.journal.clone();
-            let chemin_bg = chemin.clone();
-            let imp_bg = imprimante.clone();
-            let id_bg = id.clone();
-            std::thread::spawn(move || {
-                let resultat = printer::compter_pages_document(&chemin_bg, &imp_bg);
-                if let Ok(mut j) = journal_bg.lock() {
-                    if let Some(e) = j.entrees.iter_mut().find(|e| e.id == id_bg) {
-                        match resultat {
-                            Ok(pages) => {
-                                e.pages = pages;
-                                e.pages_reelles = pages;
-                                e.erreur_pages = None;
-                            }
-                            Err(erreur) => {
-                                e.pages = 0;
-                                e.pages_reelles = 0;
-                                e.erreur_pages = Some(erreur);
-                            }
-                        }
-                        e.version_analyse = crate::journal::VERSION_ANALYSE_PAGES;
-                    }
-                    j.sauvegarder();
-                }
-            });
         }
         self.fichiers_choisis.clear();
     }
@@ -442,7 +464,17 @@ impl App {
     }
 
     fn supprimer_entree(&mut self, id: &str) {
-        printer::annuler_impression();
+        let doit_annuler = {
+            let j = self.journal.lock().unwrap();
+            j.entrees
+                .iter()
+                .find(|e| e.id == id)
+                .map(|e| matches!(e.statut, Statut::EnAttente | Statut::EnCours))
+                .unwrap_or(false)
+        };
+        if doit_annuler {
+            printer::annuler_impression();
+        }
         let mut j = self.journal.lock().unwrap();
         j.supprimer(id);
     }
@@ -714,6 +746,7 @@ impl App {
                 } else {
                     egui::ScrollArea::vertical()
                         .id_source("historique_scroll_popup")
+                        .auto_shrink([false, true])
                         .show(ui, |ui| {
                             for (i, e) in entrees.iter().enumerate() {
                                 let fond = if i % 2 == 1 { Some(accent.gamma_multiply(0.06)) } else { None };
@@ -723,7 +756,8 @@ impl App {
                                     _ => ("", texte),
                                 };
                                 let total = if e.pages_reelles > 0 { e.pages_reelles } else { e.pages };
-                                let total_effectif = total * e.selection.copies_effectives();
+                                let total_effectif = e.selection.pages_effectives(total)
+                                    * e.selection.copies_effectives();
                                 let cellules = vec![
                                     (e.horodatage.format("%d/%m %H:%M:%S").to_string(), texte_doux),
                                     (e.expediteur.clone(), texte),
@@ -936,7 +970,7 @@ impl App {
                 egui::ScrollArea::vertical()
                     .id_source("popup_pages_scroll")
                     .max_height(320.0)
-                    .auto_shrink([false, false])
+                    .auto_shrink([false, true])
                     .show(ui, |ui| {
                         if !pret {
                             if let Some(erreur) = erreur_pages.as_ref() {
@@ -1192,7 +1226,7 @@ impl App {
         egui::ScrollArea::vertical()
             .id_source("file_scroll")
             .max_height(240.0)
-            .auto_shrink([false, false])
+            .auto_shrink([false, true])
             .show(ui, |ui| {
                 if entrees.is_empty() {
                     ui.label(egui::RichText::new("Aucun document en attente.").italics().color(texte_doux));
@@ -1355,14 +1389,13 @@ impl eframe::App for App {
             .show(ctx, |ui| {
                 egui::ScrollArea::vertical()
                     .id_source("main_scroll")
-                    .auto_shrink([false, false])
+                    .auto_shrink([false, true])
                     .show(ui, |ui| {
                         self.ui_imprimante_principale(ui);
                         separateur(ui);
                         self.ui_depot_local(ui);
                         separateur(ui);
                         self.ui_file(ui);
-                        ui.add_space(8.0);
                     });
             });
 

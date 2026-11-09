@@ -89,8 +89,9 @@ impl Journal {
             .iter()
             .filter(|e| e.statut == Statut::Imprime)
             .map(|e| {
-                let n = if e.pages_reelles > 0 { e.pages_reelles } else { e.pages };
-                (n as u64) * (e.selection.copies_effectives() as u64)
+                let total = if e.pages_reelles > 0 { e.pages_reelles } else { e.pages };
+                (e.selection.pages_effectives(total) as u64)
+                    * (e.selection.copies_effectives() as u64)
             })
             .sum()
     }

@@ -65,6 +65,18 @@ impl SelectionPages {
         if self.copies == 0 { 1 } else { self.copies }
     }
 
+    pub fn pages_effectives(&self, total: u32) -> u32 {
+        match self.mode {
+            ModePages::Toutes => total,
+            ModePages::Personnalise => {
+                self.pages_cochees
+                    .iter()
+                    .filter(|p| **p >= 1 && **p <= total)
+                    .count() as u32
+            }
+        }
+    }
+
     pub fn resume(&self, total: u32) -> String {
         match self.mode {
             ModePages::Toutes => {
@@ -113,4 +125,3 @@ pub fn formater_pages(pages: &[u32]) -> String {
     }
     morceaux.join(",")
 }
-
