@@ -3,27 +3,27 @@ use std::process::Command;
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
-pub fn assurer_regle() -> Result<(), String> {
+pub fn assurer_regle(port: u16) -> Result<(), String> {
     let exe = std::env::current_exe()
-        .map_err(|e| format!("Chemin de l'executable introuvable : {}", e))?;
+        .map_err(|e| format!("Chemin de l'exécutable introuvable : {}", e))?;
     let exe_str = exe.to_string_lossy().to_string();
 
-    if regle_valide_pour(&exe_str) {
+    if regle_existe(port) {
         return Ok(());
     }
 
     let _ = supprimer_regles();
 
-    if ajouter_regle_directe(&exe_str).is_ok() {
-        if regle_valide_pour(&exe_str) {
+    if ajouter_regle_directe(&exe_str, port).is_ok() {
+        if regle_existe(port) {
             return Ok(());
         }
     }
 
-    ajouter_regle_uac(&exe_str)
+    ajouter_regle_uac(&exe_str, port)
 }
 
-fn regle_valide_pour(exe: &str) -> bool {
+fn regle_existe(port: u16) -> bool {
     let sortie = Command::new("netsh")
         .args([
             "advfirewall",
@@ -39,8 +39,8 @@ fn regle_valide_pour(exe: &str) -> bool {
         return false;
     }
     let texte = String::from_utf8_lossy(&o.stdout).to_lowercase();
-    let cible = exe.to_lowercase().replace('/', "\\");
-    texte.contains(&cible)
+    let port_str = format!("localport:{}", port);
+    texte.contains(&port_str) || texte.contains(&format!("{}", port))
 }
 
 fn supprimer_regles() -> Result<(), String> {
@@ -60,8 +60,9 @@ fn supprimer_regles() -> Result<(), String> {
     }
 }
 
-fn ajouter_regle_directe(exe: &str) -> Result<(), String> {
+fn ajouter_regle_directe(exe: &str, port: u16) -> Result<(), String> {
     let prog_arg = format!("program=\"{}\"", exe);
+    let port_arg = format!("localport={}", port);
     let sortie = Command::new("netsh")
         .args([
             "advfirewall",
@@ -72,6 +73,8 @@ fn ajouter_regle_directe(exe: &str) -> Result<(), String> {
             "dir=in",
             "action=allow",
             &prog_arg,
+            "protocol=TCP",
+            &port_arg,
             "enable=yes",
             "profile=private,domain,public",
         ])
@@ -84,11 +87,13 @@ fn ajouter_regle_directe(exe: &str) -> Result<(), String> {
     }
 }
 
-fn ajouter_regle_uac(exe: &str) -> Result<(), String> {
+fn ajouter_regle_uac(exe: &str, port: u16) -> Result<(), String> {
     let prog_arg = format!("program=\"{}\"", exe.replace('"', ""));
+    let port_arg = format!("localport={}", port);
     let script = format!(
-        "try {{ Start-Process -FilePath 'netsh' -ArgumentList 'advfirewall','firewall','add','rule','name=OmniPrint','dir=in','action=allow','{}','enable=yes','profile=private,domain,public' -Verb RunAs -Wait -WindowStyle Hidden; exit 0 }} catch {{ Write-Output $_.Exception.Message; exit 1 }}",
+        "try {{ Start-Process -FilePath 'netsh' -ArgumentList 'advfirewall','firewall','add','rule','name=OmniPrint','dir=in','action=allow','{}','protocol=TCP','{}','enable=yes','profile=private,domain,public' -Verb RunAs -Wait -WindowStyle Hidden; exit 0 }} catch {{ Write-Output $_.Exception.Message; exit 1 }}",
         prog_arg.replace('\'', "''"),
+        port_arg
     );
     let sortie = Command::new("powershell")
         .args([
@@ -103,16 +108,16 @@ fn ajouter_regle_uac(exe: &str) -> Result<(), String> {
         .output();
     match sortie {
         Ok(o) if o.status.success() => {
-            if regle_valide_pour(exe) {
+            if regle_existe(port) {
                 Ok(())
             } else {
-                Err("Regle non creee apres elevation".into())
+                Err("Règle non créée après élévation".into())
             }
         }
         Ok(o) => {
             let msg = String::from_utf8_lossy(&o.stdout).trim().to_string();
             if msg.is_empty() {
-                Err("Demande d'elevation refusee".into())
+                Err("Demande d'élévation refusée".into())
             } else {
                 Err(msg)
             }
@@ -133,4 +138,3 @@ pub fn supprimer_toutes_regles() {
         .creation_flags(CREATE_NO_WINDOW)
         .output();
 }
-

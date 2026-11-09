@@ -2137,7 +2137,7 @@ dependencies = [
 
 [[package]]
 name = "omniprint"
-version = "0.2.0"
+version = "4.1.2"
 dependencies = [
  "chrono",
  "eframe",

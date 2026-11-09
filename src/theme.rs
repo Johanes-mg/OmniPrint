@@ -163,10 +163,10 @@ pub fn badge(ui: &mut egui::Ui, texte: &str, couleur: Color32) {
         egui::Sense::hover(),
     );
     ui.painter()
-        .rect_filled(rect, Rounding::same(11.0), couleur.gamma_multiply(0.14));
+        .rect_filled(rect, Rounding::same(6.0), couleur.gamma_multiply(0.14));
     ui.painter().rect_stroke(
         rect,
-        Rounding::same(11.0),
+        Rounding::same(6.0),
         Stroke::new(1.0_f32, couleur.gamma_multiply(0.3)),
     );
     ui.painter().text(
@@ -178,11 +178,11 @@ pub fn badge(ui: &mut egui::Ui, texte: &str, couleur: Color32) {
     );
 }
 
-pub fn bouton_theme(
+pub fn bouton_icone(
     ui: &mut egui::Ui,
     mode_sombre: bool,
-    icone_soleil: Option<&TextureHandle>,
-    icone_lune: Option<&TextureHandle>,
+    icone: Option<&TextureHandle>,
+    texte_secours: &str,
 ) -> bool {
     let taille = 32.0;
     let (rect, reponse) = ui.allocate_exact_size(egui::vec2(taille, taille), egui::Sense::click());
@@ -197,7 +197,6 @@ pub fn bouton_theme(
     ui.painter().circle_filled(centre, rayon, fond);
     ui.painter().circle_stroke(centre, rayon, Stroke::new(1.0_f32, bordure));
 
-    let icone = if mode_sombre { icone_soleil } else { icone_lune };
     if let Some(t) = icone {
         let marge = 5.0;
         let rect_img = egui::Rect::from_center_size(
@@ -211,55 +210,11 @@ pub fn bouton_theme(
             Color32::WHITE,
         );
     } else {
-        let symbole = if mode_sombre { "☀" } else { "☾" };
         let couleur = if mode_sombre { Palette::TEXTE } else { PaletteClaire::TEXTE };
         ui.painter().text(
             centre,
             egui::Align2::CENTER_CENTER,
-            symbole,
-            egui::FontId::proportional(16.0),
-            couleur,
-        );
-    }
-    reponse.clicked()
-}
-
-pub fn bouton_popup(
-    ui: &mut egui::Ui,
-    mode_sombre: bool,
-    icone_popup: Option<&TextureHandle>,
-) -> bool {
-    let taille = 32.0;
-    let (rect, reponse) = ui.allocate_exact_size(egui::vec2(taille, taille), egui::Sense::click());
-    let centre = rect.center();
-    let rayon = taille / 2.0;
-    let fond = if reponse.hovered() {
-        if mode_sombre { Color32::from_rgb(42, 48, 64) } else { Color32::from_rgb(232, 238, 250) }
-    } else {
-        if mode_sombre { Palette::CARTE } else { PaletteClaire::CARTE }
-    };
-    let bordure = if mode_sombre { Palette::BORDURE } else { PaletteClaire::BORDURE };
-    ui.painter().circle_filled(centre, rayon, fond);
-    ui.painter().circle_stroke(centre, rayon, Stroke::new(1.0_f32, bordure));
-
-    if let Some(t) = icone_popup {
-        let marge = 5.0;
-        let rect_img = egui::Rect::from_center_size(
-            centre,
-            egui::vec2(taille - marge * 2.0, taille - marge * 2.0),
-        );
-        ui.painter().image(
-            t.id(),
-            rect_img,
-            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-            Color32::WHITE,
-        );
-    } else {
-        let couleur = if mode_sombre { Palette::TEXTE } else { PaletteClaire::TEXTE };
-        ui.painter().text(
-            centre,
-            egui::Align2::CENTER_CENTER,
-            "QR",
+            texte_secours,
             egui::FontId::proportional(12.0),
             couleur,
         );
@@ -285,4 +240,3 @@ pub fn generer_qr(contenu: &str, taille_pixels: u32) -> Option<egui::ColorImage>
     let _ = taille_pixels;
     Some(image)
 }
-

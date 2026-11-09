@@ -21,7 +21,7 @@ pub struct EtatServeur {
 
 pub fn demarrer(port: u16, etat: EtatServeur) -> Result<u16, String> {
     let serveur = Server::http(format!("0.0.0.0:{}", port))
-        .map_err(|e| format!("Impossible de démarrer sur le port {} : {}", port, e))?;
+        .map_err(|e| format!("Impossible de demarrer sur le port {} : {}", port, e))?;
     let port_reel = serveur
         .server_addr()
         .to_ip()
@@ -118,7 +118,7 @@ fn recevoir_document(mut requete: tiny_http::Request, etat: &EtatServeur) -> std
     let boundary = match extraire_boundary(&content_type) {
         Some(b) => b,
         None => {
-            return repondre_json_statut(requete, 400, "{\"ok\":false,\"message\":\"Requête invalide\"}");
+            return repondre_json_statut(requete, 400, "{\"ok\":false,\"message\":\"Requete invalide\"}");
         }
     };
 
@@ -147,7 +147,7 @@ fn recevoir_document(mut requete: tiny_http::Request, etat: &EtatServeur) -> std
     let chemin = etat.dossier.join(format!("{}_{}", &id[..8], nom_sur));
 
     if let Err(e) = std::fs::write(&chemin, &contenu) {
-        return repondre_json_statut(requete, 500, &format!("{{\"ok\":false,\"message\":\"Écriture impossible : {}\"}}", echapper_json(&e.to_string())));
+        return repondre_json_statut(requete, 500, &format!("{{\"ok\":false,\"message\":\"Ecriture impossible : {}\"}}", echapper_json(&e.to_string())));
     }
 
     let selection = SelectionPages::default();
@@ -234,7 +234,7 @@ fn attendre_pages(
             }
         }
         if debut.elapsed() > timeout {
-            return Err("Le calcul du nombre de pages n'est pas terminé. Réessayez dans quelques secondes.".into());
+            return Err("Le calcul du nombre de pages n'est pas termine. Reessayez dans quelques secondes.".into());
         }
         std::thread::sleep(Duration::from_millis(200));
     }
@@ -258,7 +258,7 @@ fn imprimer_maintenant(mut requete: tiny_http::Request, etat: &EtatServeur) -> s
     }
     let imprimante = etat.imprimante.lock().unwrap().clone();
     if imprimante.is_empty() {
-        return repondre_json_statut(requete, 400, "{\"ok\":false,\"message\":\"Aucune imprimante sélectionnée sur le poste hôte\"}");
+        return repondre_json_statut(requete, 400, "{\"ok\":false,\"message\":\"Aucune imprimante selectionnee sur le poste hote\"}");
     }
 
     let total = match attendre_pages(&etat.journal, &requete_json.id, Duration::from_secs(60)) {
@@ -282,7 +282,7 @@ fn imprimer_maintenant(mut requete: tiny_http::Request, etat: &EtatServeur) -> s
             if !chemin.exists() {
                 let mut j = etat.journal.lock().unwrap();
                 j.mettre_a_jour_statut(&e.id, Statut::Erreur, "Fichier absent".into());
-                return repondre_json_statut(requete, 400, "{\"ok\":false,\"message\":\"Fichier absent sur le poste hôte\"}");
+                return repondre_json_statut(requete, 400, "{\"ok\":false,\"message\":\"Fichier absent sur le poste hote\"}");
             }
             let mode_pages = match requete_json.pages_mode.as_str() {
                 "personnalise" => ModePages::Personnalise,
@@ -319,9 +319,9 @@ fn imprimer_maintenant(mut requete: tiny_http::Request, etat: &EtatServeur) -> s
                 spec,
                 selection.copies_effectives(),
             );
-            repondre_json_statut(requete, 200, "{\"ok\":true,\"message\":\"Impression lancée\"}")
+            repondre_json_statut(requete, 200, "{\"ok\":true,\"message\":\"Impression lancee\"}")
         }
-        Some(_) => repondre_json_statut(requete, 400, "{\"ok\":false,\"message\":\"Document déjà traité\"}"),
+        Some(_) => repondre_json_statut(requete, 400, "{\"ok\":false,\"message\":\"Document deja traite\"}"),
         None => repondre_json_statut(requete, 404, "{\"ok\":false,\"message\":\"Document inconnu\"}"),
     }
 }
@@ -556,17 +556,17 @@ footer { margin: 36px auto 0; color: var(--texte-doux); font-size: 12px; text-al
 <main>
   <div class="zone" id="zone">
     <h2>Glissez vos fichiers ici</h2>
-    <p>ou cliquez pour ouvrir et sélectionner</p>
-    <button class="bouton" type="button" id="bouton-ouvrir">Ouvrir et sélectionner</button>
+    <p>ou cliquez pour ouvrir et selectionner</p>
+    <button class="bouton" type="button" id="bouton-ouvrir">Ouvrir et selectionner</button>
   </div>
   <label class="champ" for="nom">Votre nom (facultatif)</label>
   <input type="text" id="nom" placeholder="Johanes-mg" maxlength="60">
   <div class="ligne-double">
     <div>
-      <label class="champ" for="pages-mode">Pages à imprimer</label>
+      <label class="champ" for="pages-mode">Pages a imprimer</label>
       <select id="pages-mode">
         <option value="toutes">Toutes les pages</option>
-        <option value="personnalise">Sélection par case</option>
+        <option value="personnalise">Selection par case</option>
       </select>
     </div>
     <div>
@@ -575,7 +575,7 @@ footer { margin: 36px auto 0; color: var(--texte-doux); font-size: 12px; text-al
     </div>
   </div>
   <div id="bloc-selection" style="display:none; margin-top: 16px;">
-    <div class="champ" id="titre-selection">Sélection par case (analyse du document en cours…)</div>
+    <div class="champ" id="titre-selection">Selection par case (analyse du document en cours...)</div>
     <div class="pages-grid" id="pages-grid"></div>
   </div>
   <div class="mode">
@@ -585,7 +585,7 @@ footer { margin: 36px auto 0; color: var(--texte-doux); font-size: 12px; text-al
   </div>
   <div class="liste" id="liste"></div>
 </main>
-<footer>Les documents restent sur le réseau local. Aucune donnée ne quitte l'ordinateur hôte.</footer>
+<footer>Les documents restent sur le reseau local. Aucune donnee ne quitte l'ordinateur hote.</footer>
 <input type="file" id="fichier" multiple>
 <script>
 (function () {
@@ -616,7 +616,7 @@ footer { margin: 36px auto 0; color: var(--texte-doux); font-size: 12px; text-al
   function construireGrille(total) {
     if (total <= 0) return;
     pagesGrid.innerHTML = '';
-    titreSelection.textContent = 'Sélection par case (' + total + ' page(s) disponible(s))';
+    titreSelection.textContent = 'Selection par case (' + total + ' page(s) disponible(s))';
     for (var i = 1; i <= total; i++) {
       var lab = document.createElement('label');
       var inp = document.createElement('input');
@@ -637,7 +637,7 @@ footer { margin: 36px auto 0; color: var(--texte-doux); font-size: 12px; text-al
       if (totalPagesConnues > 0) {
         construireGrille(totalPagesConnues);
       } else {
-        titreSelection.textContent = 'Sélection par case (analyse du document en cours…)';
+        titreSelection.textContent = 'Selection par case (analyse du document en cours...)';
       }
     }
   }
@@ -721,19 +721,19 @@ footer { margin: 36px auto 0; color: var(--texte-doux); font-size: 12px; text-al
               majModeAffichage();
             }
             visuel.etat.className = 'etat etat-ok';
-            visuel.etat.textContent = 'Prêt (' + r.pages + ' page(s))';
+            visuel.etat.textContent = 'Pret (' + r.pages + ' page(s))';
             visuel.btnImp.disabled = false;
           }
           if (r.statut === 'Imprime') {
             visuel.etat.className = 'etat etat-ok';
-            visuel.etat.textContent = 'Imprimé';
-            visuel.btnImp.textContent = 'Imprimé';
+            visuel.etat.textContent = 'Imprime';
+            visuel.btnImp.textContent = 'Imprime';
             visuel.btnImp.disabled = true;
             return;
           }
           if (r.statut === 'Erreur') {
             messageErreur(visuel, r.message || 'Erreur');
-            visuel.btnImp.textContent = 'Réessayer';
+            visuel.btnImp.textContent = 'Reessayer';
             visuel.btnImp.disabled = false;
             return;
           }
@@ -762,7 +762,7 @@ footer { margin: 36px auto 0; color: var(--texte-doux); font-size: 12px; text-al
         if (xhr.status === 200 && rep && rep.ok && rep.id) {
           visuel.id = rep.id;
           visuel.etat.className = 'etat';
-          visuel.etat.textContent = 'Analyse du document…';
+          visuel.etat.textContent = 'Analyse du document...';
           suivreStatut(visuel, rep.id);
           visuel.btnImp.onclick = function () {
             visuel.btnImp.disabled = true;
@@ -786,24 +786,24 @@ footer { margin: 36px auto 0; color: var(--texte-doux); font-size: 12px; text-al
               if (xhr2.status === 200 && r2 && r2.ok) {
                 suivreStatut(visuel, rep.id);
               } else {
-                visuel.btnImp.textContent = 'Réessayer';
+                visuel.btnImp.textContent = 'Reessayer';
                 visuel.btnImp.disabled = false;
                 messageErreur(visuel, (r2 && r2.message) ? r2.message : 'Erreur impression');
               }
             };
             xhr2.onerror = function () {
-              visuel.btnImp.textContent = 'Réessayer';
+              visuel.btnImp.textContent = 'Reessayer';
               visuel.btnImp.disabled = false;
-              messageErreur(visuel, 'Erreur réseau');
+              messageErreur(visuel, 'Erreur reseau');
             };
             xhr2.send(JSON.stringify(payload));
           };
         } else {
-          messageErreur(visuel, (rep && rep.message) ? rep.message : ('Échec HTTP ' + xhr.status));
+          messageErreur(visuel, (rep && rep.message) ? rep.message : ('Echec HTTP ' + xhr.status));
         }
         resolve();
       };
-      xhr.onerror = function () { messageErreur(visuel, 'Échec réseau'); resolve(); };
+      xhr.onerror = function () { messageErreur(visuel, 'Echec reseau'); resolve(); };
       xhr.send(donnees);
     });
   }
@@ -839,4 +839,3 @@ footer { margin: 36px auto 0; color: var(--texte-doux); font-size: 12px; text-al
 </body>
 </html>
 "#;
-

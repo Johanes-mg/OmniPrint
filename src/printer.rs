@@ -44,6 +44,10 @@ fn tuer_processus(noms: &[&str]) {
     }
 }
 
+pub fn annuler_impression() {
+    tuer_processus(&["SumatraPDF.exe", "msedge.exe"]);
+}
+
 fn trouver_sumatra() -> Option<PathBuf> {
     let exe_dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
     let candidats: Vec<PathBuf> = vec![
@@ -143,11 +147,11 @@ try {{
     $word = $null
 
     if (-not (Test-Path -LiteralPath '{destination}')) {{
-        throw 'Word n''a pas créé le fichier PDF.'
+        throw 'Word n''a pas cree le fichier PDF.'
     }}
     $fichier = Get-Item -LiteralPath '{destination}'
     if ($fichier.Length -lt 100) {{
-        throw 'Le PDF généré est vide ou incomplet.'
+        throw 'Le PDF genere est vide ou incomplet.'
     }}
     exit 0
 }} catch {{
@@ -175,7 +179,7 @@ try {{
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
-        .map_err(|e| format!("Impossible de démarrer Microsoft Word : {}", e))?;
+        .map_err(|e| format!("Impossible de demarrer Microsoft Word : {}", e))?;
 
     let debut = Instant::now();
     loop {
@@ -183,7 +187,7 @@ try {{
             Ok(Some(statut)) => {
                 let sortie = enfant
                     .wait_with_output()
-                    .map_err(|e| format!("Lecture du résultat Word impossible : {}", e))?;
+                    .map_err(|e| format!("Lecture du resultat Word impossible : {}", e))?;
                 if statut.success() && destination.is_file() {
                     return Ok(destination);
                 }
@@ -196,7 +200,7 @@ try {{
                 };
                 let _ = std::fs::remove_file(&destination);
                 return Err(if detail.is_empty() {
-                    "Microsoft Word n'a pas réussi à convertir ce document en PDF. Vérifiez que Word est installé et que le fichier peut être ouvert.".into()
+                    "Microsoft Word n'a pas reussi a convertir ce document en PDF. Verifiez que Word est installe et que le fichier peut etre ouvert.".into()
                 } else {
                     format!("Conversion Word en PDF impossible : {}", detail)
                 });
@@ -205,7 +209,7 @@ try {{
                 if debut.elapsed() > Duration::from_secs(TIMEOUT_COM) {
                     let _ = enfant.kill();
                     let _ = std::fs::remove_file(&destination);
-                    return Err("Le traitement Word a dépassé le délai autorisé (90 secondes).".into());
+                    return Err("Le traitement Word a depasse le delai autorise (90 secondes).".into());
                 }
                 std::thread::sleep(Duration::from_millis(150));
             }
@@ -280,9 +284,9 @@ pub fn imprimer_fichier(
                     .creation_flags(CREATE_NO_WINDOW)
                     .output()
                 {
-                    Ok(o) if o.status.success() => Ok("Document transmis à l'imprimante".to_string()),
+                    Ok(o) if o.status.success() => Ok("Document transmis a l'imprimante".to_string()),
                     Ok(o) => Err(format!(
-                        "SumatraPDF a échoué (code {}). {}",
+                        "SumatraPDF a echoue (code {}). {}",
                         o.status.code().unwrap_or(-1),
                         String::from_utf8_lossy(&o.stderr).trim()
                     )),
@@ -299,15 +303,15 @@ pub fn imprimer_fichier(
                         .creation_flags(CREATE_NO_WINDOW)
                         .output()
                     {
-                        Ok(o) if o.status.success() => Ok("Document transmis à l'imprimante".to_string()),
-                        Ok(o) => Err(format!("Edge a échoué (code {})", o.status.code().unwrap_or(-1))),
+                        Ok(o) if o.status.success() => Ok("Document transmis a l'imprimante".to_string()),
+                        Ok(o) => Err(format!("Edge a echoue (code {})", o.status.code().unwrap_or(-1))),
                         Err(e) => Err(format!("Lancement Edge impossible : {}", e)),
                     }
                 } else {
-                    Err("Aucun moteur PDF trouvé. Placez SumatraPDF.exe dans le dossier bin/.".into())
+                    Err("Aucun moteur PDF trouve. Placez SumatraPDF.exe dans le dossier bin/.".into())
                 }
             } else {
-                Err("SumatraPDF est nécessaire pour respecter les pages sélectionnées, le nombre de copies et le mode noir et blanc. Placez SumatraPDF.exe dans le dossier bin/.".into())
+                Err("SumatraPDF est necessaire pour respecter les pages selectionnees, le nombre de copies et le mode noir et blanc. Placez SumatraPDF.exe dans le dossier bin/.".into())
             }
         } else if let Some(err) = erreur_conversion {
             Err(err)
@@ -325,16 +329,16 @@ pub fn imprimer_fichier(
                 )
             };
             match powershell_invisible(&script) {
-                Ok(o) if o.status.success() => Ok("Document transmis à l'imprimante".to_string()),
+                Ok(o) if o.status.success() => Ok("Document transmis a l'imprimante".to_string()),
                 Ok(o) => {
                     let msg = String::from_utf8_lossy(&o.stdout).trim().to_string();
                     Err(if msg.is_empty() {
-                        "Aucune application associée à ce format sur le poste hôte.".to_string()
+                        "Aucune application associee a ce format sur le poste hote.".to_string()
                     } else {
                         msg
                     })
                 }
-                Err(e) => Err(format!("Erreur système : {}", e)),
+                Err(e) => Err(format!("Erreur systeme : {}", e)),
             }
         };
 
@@ -562,7 +566,7 @@ pub fn compter_pages_document(chemin: &PathBuf, imprimante: &str) -> Result<u32,
         Ok(nombre)
     } else {
         Err(format!(
-            "Impossible de déterminer le nombre de pages de « {} ».",
+            "Impossible de determiner le nombre de pages de « {} ».",
             chemin.file_name().unwrap_or_default().to_string_lossy()
         ))
     }
@@ -571,4 +575,3 @@ pub fn compter_pages_document(chemin: &PathBuf, imprimante: &str) -> Result<u32,
 pub fn nettoyer_processus_office() {
     tuer_processus(&["WINWORD.EXE", "EXCEL.EXE", "POWERPNT.EXE"]);
 }
-

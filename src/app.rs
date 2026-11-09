@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use eframe::egui;
 use mdns_sd::ServiceDaemon;
@@ -13,7 +13,7 @@ use crate::plage_pages::{formater_pages, ModePages, SelectionPages};
 use crate::printer;
 use crate::reseau_utils;
 use crate::session::{ModeCouleur, Session};
-use crate::theme::{self, badge, bouton_popup, bouton_theme, separateur, Palette, PaletteClaire};
+use crate::theme::{self, badge, bouton_icone, separateur, Palette, PaletteClaire};
 use crate::web::{self, EtatServeur};
 
 pub struct App {
@@ -35,11 +35,19 @@ pub struct App {
     imprimante_partagee: Arc<Mutex<String>>,
     icone_soleil: Option<egui::TextureHandle>,
     icone_lune: Option<egui::TextureHandle>,
-    icone_popup: Option<egui::TextureHandle>,
+    icone_qr_clair: Option<egui::TextureHandle>,
+    icone_qr_sombre: Option<egui::TextureHandle>,
+    icone_settings_clair: Option<egui::TextureHandle>,
+    icone_settings_sombre: Option<egui::TextureHandle>,
+    icone_historic_clair: Option<egui::TextureHandle>,
+    icone_historic_sombre: Option<egui::TextureHandle>,
     daemon_mdns: Option<ServiceDaemon>,
     montrer_qr: bool,
+    montrer_historique: bool,
     qr_texture: Option<egui::TextureHandle>,
     qr_adresse: String,
+    panneau_parametres_ouvert: bool,
+    copie_instant: Option<Instant>,
 }
 
 impl App {
@@ -56,7 +64,12 @@ impl App {
         let imprimante_partagee = Arc::new(Mutex::new(session.nom_imprimante.clone()));
         let icone_soleil = theme::charger_texture(&cc.egui_ctx, "images/light.png", "icone_soleil");
         let icone_lune = theme::charger_texture(&cc.egui_ctx, "images/dark.png", "icone_lune");
-        let icone_popup = theme::charger_texture(&cc.egui_ctx, "images/popup.png", "icone_popup");
+        let icone_qr_clair = theme::charger_texture(&cc.egui_ctx, "images/qr-light.png", "icone_qr_clair");
+        let icone_qr_sombre = theme::charger_texture(&cc.egui_ctx, "images/qr-dark.png", "icone_qr_sombre");
+        let icone_settings_clair = theme::charger_texture(&cc.egui_ctx, "images/settings-light.png", "icone_settings_clair");
+        let icone_settings_sombre = theme::charger_texture(&cc.egui_ctx, "images/settings-dark.png", "icone_settings_sombre");
+        let icone_historic_clair = theme::charger_texture(&cc.egui_ctx, "images/historic-light.png", "icone_historic_clair");
+        let icone_historic_sombre = theme::charger_texture(&cc.egui_ctx, "images/historic-dark.png", "icone_historic_sombre");
         let mut app = Self {
             session,
             journal,
@@ -76,11 +89,19 @@ impl App {
             imprimante_partagee,
             icone_soleil,
             icone_lune,
-            icone_popup,
+            icone_qr_clair,
+            icone_qr_sombre,
+            icone_settings_clair,
+            icone_settings_sombre,
+            icone_historic_clair,
+            icone_historic_sombre,
             daemon_mdns: None,
             montrer_qr: false,
+            montrer_historique: false,
             qr_texture: None,
             qr_adresse: String::new(),
+            panneau_parametres_ouvert: false,
+            copie_instant: None,
         };
         app.reanalyser_entrees_anciennes();
         app.demarrer_serveur();
@@ -150,7 +171,7 @@ impl App {
                     self.ip_locale = reseau_utils::adresse_ip_locale();
                     self.session.port = port_reel;
                     self.session.sauvegarder();
-                    match pare_feu::assurer_regle() {
+                    match pare_feu::assurer_regle(port_reel) {
                         Ok(_) => { self.etat_pare_feu = "Pare-feu configuré".into(); }
                         Err(e) => { self.etat_pare_feu = format!("Pare-feu : {}", e); }
                     }
@@ -166,7 +187,7 @@ impl App {
 
     fn reparer_reseau(&mut self) {
         pare_feu::supprimer_toutes_regles();
-        match pare_feu::assurer_regle() {
+        match pare_feu::assurer_regle(self.port_effectif) {
             Ok(_) => {
                 self.ip_locale = reseau_utils::adresse_ip_locale();
                 self.qr_texture = None;
@@ -189,49 +210,26 @@ impl App {
     }
 
     fn reanalyser_entrees_anciennes(&mut self) {
-        let documents = {
-            let mut journal = self.journal.lock().unwrap();
-            let mut documents = Vec::new();
-            for entree in journal.entrees.iter_mut() {
-                if entree.statut == Statut::EnAttente
-                    && entree.version_analyse < crate::journal::VERSION_ANALYSE_PAGES
-                {
-                    let chemin = PathBuf::from(&entree.message);
+        let mut journal = self.journal.lock().unwrap();
+        let mut modifie = false;
+        for entree in journal.entrees.iter_mut() {
+            if entree.statut == Statut::EnAttente || entree.statut == Statut::EnCours {
+                let chemin = PathBuf::from(&entree.message);
+                if !chemin.exists() {
+                    entree.statut = Statut::Erreur;
+                    entree.message = "Fichier absent au redémarrage".into();
+                    modifie = true;
+                } else if entree.version_analyse < crate::journal::VERSION_ANALYSE_PAGES {
                     entree.pages = 0;
                     entree.pages_reelles = 0;
                     entree.erreur_pages = None;
-                    documents.push((entree.id.clone(), chemin));
+                    entree.version_analyse = crate::journal::VERSION_ANALYSE_PAGES;
+                    modifie = true;
                 }
             }
+        }
+        if modifie {
             journal.sauvegarder();
-            documents
-        };
-
-        let imprimante = self.session.nom_imprimante.clone();
-        for (id, chemin) in documents {
-            let journal_bg = self.journal.clone();
-            let imprimante_bg = imprimante.clone();
-            std::thread::spawn(move || {
-                let resultat = printer::compter_pages_document(&chemin, &imprimante_bg);
-                if let Ok(mut journal) = journal_bg.lock() {
-                    if let Some(entree) = journal.entrees.iter_mut().find(|e| e.id == id) {
-                        match resultat {
-                            Ok(pages) => {
-                                entree.pages = pages;
-                                entree.pages_reelles = pages;
-                                entree.erreur_pages = None;
-                            }
-                            Err(erreur) => {
-                                entree.pages = 0;
-                                entree.pages_reelles = 0;
-                                entree.erreur_pages = Some(erreur);
-                            }
-                        }
-                        entree.version_analyse = crate::journal::VERSION_ANALYSE_PAGES;
-                    }
-                    journal.sauvegarder();
-                }
-            });
         }
     }
 
@@ -444,11 +442,13 @@ impl App {
     }
 
     fn supprimer_entree(&mut self, id: &str) {
+        printer::annuler_impression();
         let mut j = self.journal.lock().unwrap();
         j.supprimer(id);
     }
 
     fn vider_file(&mut self) {
+        printer::annuler_impression();
         let mut j = self.journal.lock().unwrap();
         j.vider_file();
     }
@@ -484,33 +484,53 @@ impl App {
 
     fn ui_entete(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         let texte = self.couleur_texte();
-        let succes = self.couleur_succes();
-        let erreur = self.couleur_erreur();
         let mut basculer = false;
         let mut ouvrir_qr = false;
+        let mut ouvrir_parametres = false;
+        let mut ouvrir_historique = false;
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new("OmniPrint").size(22.0).strong().color(texte));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if self.serveur_demarre {
-                    badge(ui, "SERVEUR ACTIF", succes);
-                } else {
-                    badge(ui, "SERVEUR INACTIF", erreur);
-                }
                 ui.add_space(4.0);
                 let soleil = self.icone_soleil.as_ref();
                 let lune = self.icone_lune.as_ref();
-                if bouton_theme(ui, self.session.mode_sombre, soleil, lune) {
+                let icone_theme = if self.session.mode_sombre { soleil } else { lune };
+                if bouton_icone(ui, self.session.mode_sombre, icone_theme, "☀") {
                     basculer = true;
                 }
                 ui.add_space(4.0);
-                let popup = self.icone_popup.as_ref();
-                if bouton_popup(ui, self.session.mode_sombre, popup) {
+                let qr_icone = if self.session.mode_sombre {
+                    self.icone_qr_clair.as_ref()
+                } else {
+                    self.icone_qr_sombre.as_ref()
+                };
+                if bouton_icone(ui, self.session.mode_sombre, qr_icone, "QR") {
                     ouvrir_qr = true;
+                }
+                ui.add_space(4.0);
+                let historic_icone = if self.session.mode_sombre {
+                    self.icone_historic_clair.as_ref()
+                } else {
+                    self.icone_historic_sombre.as_ref()
+                };
+                if bouton_icone(ui, self.session.mode_sombre, historic_icone, "H") {
+                    ouvrir_historique = true;
+                }
+                ui.add_space(4.0);
+                let settings_icone = if self.session.mode_sombre {
+                    self.icone_settings_clair.as_ref()
+                } else {
+                    self.icone_settings_sombre.as_ref()
+                };
+                if bouton_icone(ui, self.session.mode_sombre, settings_icone, "⚙") {
+                    ouvrir_parametres = true;
                 }
             });
         });
         if basculer { self.basculer_theme(ctx); }
         if ouvrir_qr { self.montrer_qr = !self.montrer_qr; }
+        if ouvrir_historique { self.montrer_historique = !self.montrer_historique; }
+        if ouvrir_parametres { self.panneau_parametres_ouvert = !self.panneau_parametres_ouvert; }
     }
 
     fn ui_qr_popup(&mut self, ctx: &egui::Context) {
@@ -519,14 +539,16 @@ impl App {
         self.assurer_qr(ctx);
 
         let texte = self.couleur_texte();
-        let texte_doux = self.couleur_texte_doux();
         let carte = self.couleur_carte();
         let bordure = self.couleur_bordure();
         let accent_fonce = self.couleur_accent_fonce();
+        let succes = self.couleur_succes();
         let ip = self.ip_locale.clone();
         let port = self.port_effectif;
-        let etat_pf = self.etat_pare_feu.clone();
-        let mut reparer = false;
+
+        let copie_recente = self.copie_instant
+            .map(|t| t.elapsed() < Duration::from_secs(1))
+            .unwrap_or(false);
 
         let mut ouvert = self.montrer_qr;
         egui::Window::new("Partage d'accès")
@@ -583,11 +605,10 @@ impl App {
                     if self.daemon_mdns.is_some() {
                         ui.add_space(10.0);
                         let largeur_totale = 340.0;
-                        let largeur_lien = largeur_totale * 0.75;
-                        let largeur_bouton = largeur_totale * 0.25;
+                        let largeur_bouton = 90.0;
                         ui.horizontal(|ui| {
                             ui.allocate_ui_with_layout(
-                                egui::vec2(largeur_lien, 32.0),
+                                egui::vec2(largeur_totale - largeur_bouton, 32.0),
                                 egui::Layout::left_to_right(egui::Align::Center),
                                 |ui| {
                                     let texte_lien = format!("omniprint.local:{}", port);
@@ -596,114 +617,194 @@ impl App {
                             );
                             ui.allocate_ui_with_layout(
                                 egui::vec2(largeur_bouton, 32.0),
-                                egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
+                                egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
-                                    if ui.button("Copier").clicked() {
+                                    let libelle = if copie_recente { "Copié" } else { "Copier" };
+                                    let couleur_fond = if copie_recente { succes } else { accent_fonce };
+                                    let texte_bouton = egui::RichText::new(libelle)
+                                        .size(13.0)
+                                        .color(egui::Color32::WHITE);
+                                    let bouton = egui::Button::new(texte_bouton)
+                                        .fill(couleur_fond)
+                                        .min_size(egui::vec2(largeur_bouton - 4.0, 28.0));
+                                    if ui.add(bouton).clicked() {
                                         let url = format!("http://omniprint.local:{}/", port);
                                         ui.output_mut(|o| o.copied_text = url);
+                                        self.copie_instant = Some(Instant::now());
                                     }
                                 },
                             );
                         });
                     }
-                    ui.add_space(14.0);
-                    ui.label(egui::RichText::new(&etat_pf).size(11.0).color(texte_doux));
-                    ui.add_space(6.0);
-                    if ui.button("Réparer l'accès réseau").clicked() {
-                        reparer = true;
-                    }
                 });
             });
         self.montrer_qr = ouvert;
-        if reparer { self.reparer_reseau(); }
+
+        if let Some(t) = self.copie_instant {
+            if t.elapsed() >= Duration::from_secs(1) {
+                self.copie_instant = None;
+            } else {
+                ctx.request_repaint_after(Duration::from_millis(50));
+            }
+        }
     }
 
-    fn ui_imprimante(&mut self, ui: &mut egui::Ui) {
-        ui.label(
-            egui::RichText::new("Imprimante connectée en USB à cet ordinateur")
-                .size(12.0)
-                .color(self.couleur_texte_doux()),
-        );
-        ui.add_space(4.0);
-        ui.horizontal(|ui| {
-            let courant = if self.session.nom_imprimante.is_empty() {
-                "Choisir une imprimante".to_string()
-            } else {
-                self.session.nom_imprimante.clone()
-            };
-            egui::ComboBox::from_id_source("combo_imprimante")
-                .selected_text(courant)
-                .width(340.0)
-                .show_ui(ui, |ui| {
-                    for nom in &self.imprimantes {
-                        if ui
-                            .selectable_label(self.session.nom_imprimante == *nom, nom)
-                            .clicked()
-                        {
-                            self.session.nom_imprimante = nom.clone();
-                            *self.imprimante_partagee.lock().unwrap() = nom.clone();
-                            self.session.sauvegarder();
+    fn ui_historique_popup(&mut self, ctx: &egui::Context) {
+        if !self.montrer_historique { return; }
+
+        let texte = self.couleur_texte();
+        let texte_doux = self.couleur_texte_doux();
+        let carte = self.couleur_carte();
+        let bordure = self.couleur_bordure();
+        let accent = self.couleur_accent();
+        let succes = self.couleur_succes();
+        let erreur = self.couleur_erreur();
+
+        let mut ouvert = self.montrer_historique;
+        egui::Window::new("Historique")
+            .collapsible(false)
+            .resizable(true)
+            .open(&mut ouvert)
+            .frame(
+                egui::Frame::none()
+                    .fill(carte)
+                    .stroke(egui::Stroke::new(1.0_f32, bordure))
+                    .rounding(egui::Rounding::same(14.0))
+                    .inner_margin(egui::Margin::same(20.0)),
+            )
+            .default_width(800.0)
+            .default_height(600.0)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .show(ctx, |ui| {
+                let total_pages = { let j = self.journal.lock().unwrap(); j.pages_imprimees() };
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("Historique").size(15.0).strong().color(texte));
+                    badge(ui, &format!("{} pages imprimées", total_pages), accent);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("Effacer l'historique").clicked() {
+                            self.supprimer_historique();
                         }
-                    }
+                    });
                 });
-            if ui.button("Rafraîchir la liste").clicked() {
-                self.rafraichir_imprimantes();
-            }
-        });
-        ui.add_space(6.0);
-        ui.label(
-            egui::RichText::new("Mode d'impression")
-                .size(12.0)
-                .color(self.couleur_texte_doux()),
-        );
-        ui.add_space(2.0);
-        ui.horizontal(|ui| {
-            let mut courant = self.session.mode_couleur;
-            let btn_couleur = egui::Button::new(
-                egui::RichText::new("Couleur")
-                    .size(13.0)
-                    .color(if courant == ModeCouleur::Couleur {
-                        egui::Color32::WHITE
-                    } else {
-                        self.couleur_texte()
-                    }),
-            )
-            .fill(if courant == ModeCouleur::Couleur {
-                self.couleur_accent_fonce()
-            } else {
-                self.couleur_carte()
+                ui.add_space(4.0);
+
+                let entrees: Vec<Entree> = {
+                    let j = self.journal.lock().unwrap();
+                    j.entrees
+                        .iter()
+                        .filter(|e| e.statut == Statut::Imprime || e.statut == Statut::Erreur)
+                        .rev()
+                        .take(500)
+                        .cloned()
+                        .collect()
+                };
+
+                let largeur = ui.available_width();
+                let cols = [0.11, 0.13, 0.18, 0.06, 0.18, 0.06, 0.09, 0.11, 0.08];
+                let largeurs: Vec<f32> = cols.iter().map(|c| c * largeur).collect();
+
+                let titres = ["Date", "Expéditeur", "Fichier", "Pages", "Sélection", "Copies", "Statut", "Message", "Action"];
+                Self::ligne_entete(ui, &largeurs, &titres, texte);
+                ui.separator();
+
+                let mut a_supprimer: Option<String> = None;
+
+                if entrees.is_empty() {
+                    ui.label(egui::RichText::new("Aucun document traité.").italics().color(texte_doux));
+                } else {
+                    egui::ScrollArea::vertical()
+                        .id_source("historique_scroll_popup")
+                        .show(ui, |ui| {
+                            for (i, e) in entrees.iter().enumerate() {
+                                let fond = if i % 2 == 1 { Some(accent.gamma_multiply(0.06)) } else { None };
+                                let (txt, col) = match e.statut {
+                                    Statut::Imprime => ("imprimé", succes),
+                                    Statut::Erreur => ("erreur", erreur),
+                                    _ => ("", texte),
+                                };
+                                let total = if e.pages_reelles > 0 { e.pages_reelles } else { e.pages };
+                                let total_effectif = total * e.selection.copies_effectives();
+                                let cellules = vec![
+                                    (e.horodatage.format("%d/%m %H:%M:%S").to_string(), texte_doux),
+                                    (e.expediteur.clone(), texte),
+                                    (e.nom_fichier.clone(), texte),
+                                    (format!("{}", total_effectif), texte),
+                                    (e.selection.resume(total), texte_doux),
+                                    (format!("{}", e.selection.copies_effectives()), texte),
+                                    (txt.to_string(), col),
+                                    (e.message.clone(), texte_doux),
+                                    ("Supprimer".to_string(), accent),
+                                ];
+                                if Self::ligne_tableau(ui, &largeurs, &cellules, fond).is_some() {
+                                    a_supprimer = Some(e.id.clone());
+                                }
+                            }
+                        });
+                }
+
+                if let Some(id) = a_supprimer {
+                    self.supprimer_entree(&id);
+                }
             });
-            if ui.add(btn_couleur).clicked() {
-                courant = ModeCouleur::Couleur;
-            }
-            let btn_nb = egui::Button::new(
-                egui::RichText::new("Noir et blanc")
-                    .size(13.0)
-                    .color(if courant == ModeCouleur::NoirBlanc {
-                        egui::Color32::WHITE
-                    } else {
-                        self.couleur_texte()
-                    }),
+        self.montrer_historique = ouvert;
+    }
+
+    fn ui_panneau_parametres_popup(&mut self, ctx: &egui::Context) {
+        if !self.panneau_parametres_ouvert { return; }
+
+        let carte = self.couleur_carte();
+        let bordure = self.couleur_bordure();
+        let texte = self.couleur_texte();
+
+        let mut ouvert = self.panneau_parametres_ouvert;
+        egui::Window::new("Paramètres")
+            .collapsible(false)
+            .resizable(false)
+            .open(&mut ouvert)
+            .frame(
+                egui::Frame::none()
+                    .fill(carte)
+                    .stroke(egui::Stroke::new(1.0_f32, bordure))
+                    .rounding(egui::Rounding::same(14.0))
+                    .inner_margin(egui::Margin::same(24.0)),
             )
-            .fill(if courant == ModeCouleur::NoirBlanc {
-                self.couleur_accent_fonce()
-            } else {
-                self.couleur_carte()
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .show(ctx, |ui| {
+                ui.set_min_width(360.0);
+                ui.vertical(|ui| {
+                    ui.label(egui::RichText::new("Port du serveur").size(14.0).strong().color(texte));
+                    ui.add_space(4.0);
+                    let ports = crate::config::PORTS_PROPOSES;
+                    let mut port_choisi = self.session.port;
+                    egui::ComboBox::from_id_source("combo_port_popup")
+                        .selected_text(format!("{}", port_choisi))
+                        .width(150.0)
+                        .show_ui(ui, |ui| {
+                            for p in ports.iter() {
+                                if ui.selectable_label(port_choisi == *p, p.to_string()).clicked() {
+                                    port_choisi = *p;
+                                }
+                            }
+                        });
+                    if port_choisi != self.session.port {
+                        self.session.port = port_choisi;
+                        self.session.sauvegarder();
+                        self.message_statut = "Port changé. Redémarrez l'application pour appliquer.".into();
+                    }
+                    ui.add_space(16.0);
+                    if ui.button("Réparer l'accès réseau").clicked() {
+                        self.reparer_reseau();
+                    }
+                    ui.add_space(8.0);
+                    ui.label(egui::RichText::new(&self.etat_pare_feu).size(12.0).color(self.couleur_texte_doux()));
+                });
             });
-            if ui.add(btn_nb).clicked() {
-                courant = ModeCouleur::NoirBlanc;
-            }
-            if courant != self.session.mode_couleur {
-                self.session.mode_couleur = courant;
-                self.session.sauvegarder();
-            }
-        });
+        self.panneau_parametres_ouvert = ouvert;
     }
 
     fn ui_selection_pages(&mut self, ui: &mut egui::Ui) {
         let texte_doux = self.couleur_texte_doux();
         let accent_fonce = self.couleur_accent_fonce();
-        let accent = self.couleur_accent();
 
         ui.label(
             egui::RichText::new("Pages à imprimer")
@@ -770,8 +871,6 @@ impl App {
                 self.selection_locale.copies = copies;
             }
         });
-
-        let _ = accent;
     }
 
     fn ui_popup_selection_pages(&mut self, ctx: &egui::Context) {
@@ -1135,77 +1234,86 @@ impl App {
         }
     }
 
-    fn ui_historique(&mut self, ui: &mut egui::Ui) {
-        let texte = self.couleur_texte();
-        let texte_doux = self.couleur_texte_doux();
-        let accent = self.couleur_accent();
-        let succes = self.couleur_succes();
-        let erreur = self.couleur_erreur();
-
-        let total_pages = { let j = self.journal.lock().unwrap(); j.total_pages() };
-        ui.horizontal(|ui| {
-            ui.label(egui::RichText::new("Historique").size(15.0).strong().color(texte));
-            badge(ui, &format!("{} pages imprimées", total_pages), accent);
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("Effacer l'historique").clicked() {
-                    self.supprimer_historique();
-                }
-            });
-        });
+    fn ui_imprimante_principale(&mut self, ui: &mut egui::Ui) {
+        ui.label(
+            egui::RichText::new("Imprimante connectée en USB à cet ordinateur")
+                .size(12.0)
+                .color(self.couleur_texte_doux()),
+        );
         ui.add_space(4.0);
-
-        let entrees: Vec<Entree> = {
-            let j = self.journal.lock().unwrap();
-            j.entrees
-                .iter()
-                .filter(|e| e.statut == Statut::Imprime || e.statut == Statut::Erreur)
-                .rev()
-                .take(500)
-                .cloned()
-                .collect()
-        };
-
-        let largeur = ui.available_width();
-        let cols = [0.11, 0.13, 0.18, 0.06, 0.18, 0.06, 0.09, 0.11, 0.08];
-        let largeurs: Vec<f32> = cols.iter().map(|c| c * largeur).collect();
-
-        let titres = ["Date", "Expéditeur", "Fichier", "Pages", "Sélection", "Copies", "Statut", "Message", "Action"];
-        Self::ligne_entete(ui, &largeurs, &titres, texte);
-        ui.separator();
-
-        let mut a_supprimer: Option<String> = None;
-
-        if entrees.is_empty() {
-            ui.label(egui::RichText::new("Aucun document traité.").italics().color(texte_doux));
-        } else {
-            for (i, e) in entrees.iter().enumerate() {
-                let fond = if i % 2 == 1 { Some(accent.gamma_multiply(0.06)) } else { None };
-                let (txt, col) = match e.statut {
-                    Statut::Imprime => ("imprimé", succes),
-                    Statut::Erreur => ("erreur", erreur),
-                    _ => ("", texte),
-                };
-                let total = if e.pages_reelles > 0 { e.pages_reelles } else { e.pages };
-                let cellules = vec![
-                    (e.horodatage.format("%d/%m %H:%M:%S").to_string(), texte_doux),
-                    (e.expediteur.clone(), texte),
-                    (e.nom_fichier.clone(), texte),
-                    (format!("{}", total), texte),
-                    (e.selection.resume(total), texte_doux),
-                    (format!("{}", e.selection.copies_effectives()), texte),
-                    (txt.to_string(), col),
-                    (e.message.clone(), texte_doux),
-                    ("Supprimer".to_string(), accent),
-                ];
-                if Self::ligne_tableau(ui, &largeurs, &cellules, fond).is_some() {
-                    a_supprimer = Some(e.id.clone());
-                }
+        ui.horizontal(|ui| {
+            let courant = if self.session.nom_imprimante.is_empty() {
+                "Choisir une imprimante".to_string()
+            } else {
+                self.session.nom_imprimante.clone()
+            };
+            egui::ComboBox::from_id_source("combo_imprimante_principal")
+                .selected_text(courant)
+                .width(340.0)
+                .show_ui(ui, |ui| {
+                    for nom in &self.imprimantes {
+                        if ui
+                            .selectable_label(self.session.nom_imprimante == *nom, nom)
+                            .clicked()
+                        {
+                            self.session.nom_imprimante = nom.clone();
+                            *self.imprimante_partagee.lock().unwrap() = nom.clone();
+                            self.session.sauvegarder();
+                        }
+                    }
+                });
+            if ui.button("Rafraîchir la liste").clicked() {
+                self.rafraichir_imprimantes();
             }
-        }
-
-        if let Some(id) = a_supprimer {
-            self.supprimer_entree(&id);
-        }
+        });
+        ui.add_space(6.0);
+        ui.label(
+            egui::RichText::new("Mode d'impression par défaut")
+                .size(12.0)
+                .color(self.couleur_texte_doux()),
+        );
+        ui.add_space(2.0);
+        ui.horizontal(|ui| {
+            let mut courant = self.session.mode_couleur;
+            let btn_couleur = egui::Button::new(
+                egui::RichText::new("Couleur")
+                    .size(13.0)
+                    .color(if courant == ModeCouleur::Couleur {
+                        egui::Color32::WHITE
+                    } else {
+                        self.couleur_texte()
+                    }),
+            )
+            .fill(if courant == ModeCouleur::Couleur {
+                self.couleur_accent_fonce()
+            } else {
+                self.couleur_carte()
+            });
+            if ui.add(btn_couleur).clicked() {
+                courant = ModeCouleur::Couleur;
+            }
+            let btn_nb = egui::Button::new(
+                egui::RichText::new("Noir et blanc")
+                    .size(13.0)
+                    .color(if courant == ModeCouleur::NoirBlanc {
+                        egui::Color32::WHITE
+                    } else {
+                        self.couleur_texte()
+                    }),
+            )
+            .fill(if courant == ModeCouleur::NoirBlanc {
+                self.couleur_accent_fonce()
+            } else {
+                self.couleur_carte()
+            });
+            if ui.add(btn_nb).clicked() {
+                courant = ModeCouleur::NoirBlanc;
+            }
+            if courant != self.session.mode_couleur {
+                self.session.mode_couleur = courant;
+                self.session.sauvegarder();
+            }
+        });
     }
 }
 
@@ -1227,6 +1335,7 @@ impl eframe::App for App {
             .show(ctx, |ui| {
                 self.ui_entete(ui, ctx);
             });
+
         egui::TopBottomPanel::bottom("pied")
             .frame(
                 egui::Frame::none()
@@ -1248,17 +1357,18 @@ impl eframe::App for App {
                     .id_source("main_scroll")
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
-                        self.ui_imprimante(ui);
+                        self.ui_imprimante_principale(ui);
                         separateur(ui);
                         self.ui_depot_local(ui);
                         separateur(ui);
                         self.ui_file(ui);
-                        separateur(ui);
-                        self.ui_historique(ui);
                         ui.add_space(8.0);
                     });
             });
+
         self.ui_qr_popup(ctx);
+        self.ui_historique_popup(ctx);
+        self.ui_panneau_parametres_popup(ctx);
         self.ui_popup_selection_pages(ctx);
         ctx.request_repaint_after(Duration::from_millis(250));
     }
@@ -1272,4 +1382,3 @@ impl eframe::App for App {
         self.journal.lock().unwrap().sauvegarder();
     }
 }
-

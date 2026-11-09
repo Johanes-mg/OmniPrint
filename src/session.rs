@@ -65,7 +65,6 @@ impl Session {
         match std::fs::read_to_string(&chemin) {
             Ok(s) => {
                 let mut session: Self = serde_json::from_str(&s).unwrap_or_default();
-                // Migrate only the previous built-in default; keep any user-defined port.
                 if session.port == 47823 {
                     session.port = config::DEFAULT_PORT;
                     session.sauvegarder();
@@ -83,4 +82,3 @@ impl Session {
         }
     }
 }
-

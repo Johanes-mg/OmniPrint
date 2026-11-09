@@ -1,8 +1,8 @@
 [package]
 name = "omniprint"
-version = "0.2.0"
+version = "4.1.2"
 edition = "2021"
-description = "Impression partagee sur reseau local via navigateur"
+description = "Impression partagée sur réseau local via navigateur"
 authors = ["Johanes-mg"]
 
 [dependencies]
@@ -25,4 +25,3 @@ opt-level = 3
 lto = true
 codegen-units = 1
 strip = true
-
