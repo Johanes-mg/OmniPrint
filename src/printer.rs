@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::journal::Statut;
-use crate::session::ModeCouleur;
+use crate::session::{ModeCouleur, Orientation};
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const TIMEOUT_COM: u64 = 90;
@@ -95,11 +95,18 @@ fn est_document_word(extension: &str) -> bool {
     )
 }
 
+fn est_document_excel(extension: &str) -> bool {
+    matches!(
+        extension,
+        "xlsx" | "xlsm" | "xltx" | "xltm" | "xls" | "xlsb" | "ods" | "csv"
+    )
+}
+
 fn echapper_chaine_powershell(valeur: &str) -> String {
     valeur.replace('\'', "''")
 }
 
-fn convertir_word_en_pdf(chemin: &Path, imprimante: &str) -> Result<PathBuf, String> {
+fn convertir_word_en_pdf(chemin: &Path, imprimante: &str, orientation: Orientation) -> Result<PathBuf, String> {
     if !chemin.is_file() {
         return Err("Le document Word est introuvable.".into());
     }
@@ -111,6 +118,10 @@ fn convertir_word_en_pdf(chemin: &Path, imprimante: &str) -> Result<PathBuf, Str
     let source_ps = echapper_chaine_powershell(&chemin.to_string_lossy());
     let destination_ps = echapper_chaine_powershell(&destination.to_string_lossy());
     let imprimante_ps = echapper_chaine_powershell(imprimante);
+    let orientation_val = match orientation {
+        Orientation::Portrait => 1,
+        Orientation::Paysage => 2,
+    };
 
     let script = format!(
         r#"$ErrorActionPreference = 'Stop'
@@ -134,6 +145,7 @@ try {{
 
     $document = $word.Documents.Open('{source}', $false, $true, $false)
     try {{ $word.ActiveWindow.View.Type = 3 }} catch {{}}
+    try {{ $document.PageSetup.Orientation = {orientation_val} }} catch {{}}
     try {{ $document.Repaginate() }} catch {{}}
 
     $document.ExportAsFixedFormat(
@@ -164,6 +176,7 @@ try {{
         printer = imprimante_ps,
         source = source_ps,
         destination = destination_ps,
+        orientation_val = orientation_val,
     );
 
     let mut enfant = Command::new("powershell")
@@ -200,7 +213,7 @@ try {{
                 };
                 let _ = std::fs::remove_file(&destination);
                 return Err(if detail.is_empty() {
-                    "Microsoft Word n'a pas reussi a convertir ce document en PDF. Verifiez que Word est installe et que le fichier peut etre ouvert.".into()
+                    "Microsoft Word n'a pas reussi a convertir ce document en PDF.".into()
                 } else {
                     format!("Conversion Word en PDF impossible : {}", detail)
                 });
@@ -221,14 +234,106 @@ try {{
     }
 }
 
+fn imprimer_excel_com(
+    chemin: &Path,
+    imprimante: &str,
+    feuilles: &str,
+    monochrome: bool,
+    copies: u32,
+    orientation: Orientation,
+) -> Result<(), String> {
+    let chemin_esc = echapper_chaine_powershell(&chemin.to_string_lossy());
+    let imprimante_esc = echapper_chaine_powershell(imprimante);
+    let orientation_val = match orientation {
+        Orientation::Portrait => 1,
+        Orientation::Paysage => 2,
+    };
+    let noir_et_blanc = if monochrome { "1" } else { "0" };
+
+    let script = format!(
+        r#"$ErrorActionPreference='Stop'
+$x = $null
+$wb = $null
+try {{
+  $x = New-Object -ComObject Excel.Application
+  $x.Visible = $false
+  $x.DisplayAlerts = $false
+  $wb = $x.Workbooks.Open('{chemin}', 0, $true)
+  
+  if ('{imprimante}' -ne '') {{
+      try {{ $x.ActivePrinter = '{imprimante}' }} catch {{}}
+  }}
+
+  $feuilles_a_imprimer = @({feuilles})
+
+  foreach ($sheet in $wb.Worksheets) {{
+      $idx = $sheet.Index
+      if ($feuilles_a_imprimer.Count -eq 0 -or $feuilles_a_imprimer -contains $idx) {{
+          try {{ $sheet.PageSetup.Orientation = {orientation} }} catch {{}}
+          try {{ $sheet.PageSetup.BlackAndWhite = ${noir_et_blanc} }} catch {{}}
+          $sheet.PrintOut(1, 1, {copies}, $false, '{imprimante}', $false, $true, $null)
+      }}
+  }}
+
+  try {{ $wb.Close($false) }} catch {{}}
+  try {{ $x.Quit() }} catch {{}}
+  exit 0
+}} catch {{
+  if ($wb -ne $null) {{ try {{ $wb.Close($false) }} catch {{}} }}
+  if ($x -ne $null) {{ try {{ $x.Quit() }} catch {{}} }}
+  [Console]::Error.WriteLine($_.Exception.Message)
+  exit 1
+}}"#,
+        chemin = chemin_esc,
+        imprimante = imprimante_esc,
+        feuilles = if feuilles.trim().is_empty() { "".to_string() } else { feuilles.split(',').map(|s| s.trim()).collect::<Vec<_>>().join(",") },
+        orientation = orientation_val,
+        noir_et_blanc = noir_et_blanc,
+        copies = copies,
+    );
+
+    let mut enfant = Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", &script])
+        .creation_flags(CREATE_NO_WINDOW)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Impossible de demarrer Excel : {}", e))?;
+
+    let debut = Instant::now();
+    loop {
+        match enfant.try_wait() {
+            Ok(Some(statut)) => {
+                let sortie = enfant.wait_with_output().map_err(|e| format!("Lecture Excel : {}", e))?;
+                if statut.success() {
+                    return Ok(());
+                }
+                let msg = String::from_utf8_lossy(&sortie.stderr).trim().to_string();
+                return Err(format!("Erreur lors de l'impression Excel : {}", msg));
+            }
+            Ok(None) => {
+                if debut.elapsed() > Duration::from_secs(TIMEOUT_COM) {
+                    let _ = enfant.kill();
+                    tuer_processus(&["EXCEL.EXE"]);
+                    return Err("Le traitement Excel a depasse le delai autorise.".into());
+                }
+                std::thread::sleep(Duration::from_millis(150));
+            }
+            Err(e) => return Err(format!("Erreur d'execution Excel : {}", e)),
+        }
+    }
+}
+
 pub fn imprimer_fichier(
     nom_imprimante: &str,
     chemin_fichier: &PathBuf,
     journal_id: String,
     journal: Arc<Mutex<crate::journal::Journal>>,
     mode_couleur: ModeCouleur,
+    orientation: Orientation,
     pages_spec: String,
     copies: u32,
+    est_feuille: bool,
 ) {
     let nom_imprimante = nom_imprimante.to_string();
     let chemin = chemin_fichier.clone();
@@ -246,107 +351,118 @@ pub fn imprimer_fichier(
             .map(|e| e.to_string_lossy().to_lowercase())
             .unwrap_or_default();
 
-        let (chemin_pdf, pdf_temporaire, erreur_conversion) = if extension == "pdf" {
-            (Some(chemin.clone()), false, None)
-        } else if est_document_word(&extension) {
-            match convertir_word_en_pdf(&chemin, &nom_imprimante) {
-                Ok(pdf) => (Some(pdf), true, None),
-                Err(e) => (None, false, Some(e)),
-            }
+        let resultat = if est_document_excel(&extension) {
+            imprimer_excel_com(&chemin, &nom_imprimante, &pages_spec, monochrome, copies, orientation)
+                .map(|_| "Document transmis a l'imprimante".to_string())
         } else {
-            (None, false, None)
-        };
+            let (chemin_pdf, pdf_temporaire, erreur_conversion) = if extension == "pdf" {
+                (Some(chemin.clone()), false, None)
+            } else if est_document_word(&extension) {
+                match convertir_word_en_pdf(&chemin, &nom_imprimante, orientation) {
+                    Ok(pdf) => (Some(pdf), true, None),
+                    Err(e) => (None, false, Some(e)),
+                }
+            } else {
+                (None, false, None)
+            };
 
-        let resultat = if let Some(pdf) = chemin_pdf.as_ref() {
-            if let Some(sumatra) = trouver_sumatra() {
-                let mut args = vec!["-print-to".to_string(), nom_imprimante.clone()];
-                let mut reglages = Vec::new();
+            let res = if let Some(pdf) = chemin_pdf.as_ref() {
+                if let Some(sumatra) = trouver_sumatra() {
+                    let mut args = vec!["-print-to".to_string(), nom_imprimante.clone()];
+                    let mut reglages = Vec::new();
 
-                if monochrome {
-                    reglages.push("monochrome".to_string());
-                }
-                if copies > 1 {
-                    reglages.push(format!("{}x", copies));
-                }
-                if !pages_spec.trim().is_empty() {
-                    reglages.push(pages_spec.trim().to_string());
-                }
-                if !reglages.is_empty() {
-                    args.push("-print-settings".into());
-                    args.push(reglages.join(","));
-                }
+                    if monochrome {
+                        reglages.push("monochrome".to_string());
+                    }
+                    if copies > 1 {
+                        reglages.push(format!("{}x", copies));
+                    }
+                    if !pages_spec.trim().is_empty() {
+                        reglages.push(pages_spec.trim().to_string());
+                    }
+                    match orientation {
+                        Orientation::Portrait => reglages.push("portrait".to_string()),
+                        Orientation::Paysage => reglages.push("landscape".to_string()),
+                    }
 
-                args.push("-silent".into());
-                args.push(pdf.to_string_lossy().to_string());
+                    if !reglages.is_empty() {
+                        args.push("-print-settings".into());
+                        args.push(reglages.join(","));
+                    }
 
-                match Command::new(&sumatra)
-                    .args(&args)
-                    .creation_flags(CREATE_NO_WINDOW)
-                    .output()
-                {
-                    Ok(o) if o.status.success() => Ok("Document transmis a l'imprimante".to_string()),
-                    Ok(o) => Err(format!(
-                        "SumatraPDF a echoue (code {}). {}",
-                        o.status.code().unwrap_or(-1),
-                        String::from_utf8_lossy(&o.stderr).trim()
-                    )),
-                    Err(e) => Err(format!("Lancement de SumatraPDF impossible : {}", e)),
-                }
-            } else if pages_spec.trim().is_empty() && copies == 1 && !monochrome {
-                if let Some(edge) = trouver_edge() {
-                    match Command::new(&edge)
-                        .args([
-                            "--headless",
-                            &format!("--print-to-printer={}", nom_imprimante),
-                            &pdf.to_string_lossy(),
-                        ])
+                    args.push("-silent".into());
+                    args.push(pdf.to_string_lossy().to_string());
+
+                    match Command::new(&sumatra)
+                        .args(&args)
                         .creation_flags(CREATE_NO_WINDOW)
                         .output()
                     {
                         Ok(o) if o.status.success() => Ok("Document transmis a l'imprimante".to_string()),
-                        Ok(o) => Err(format!("Edge a echoue (code {})", o.status.code().unwrap_or(-1))),
-                        Err(e) => Err(format!("Lancement Edge impossible : {}", e)),
+                        Ok(o) => Err(format!(
+                            "SumatraPDF a echoue (code {}). {}",
+                            o.status.code().unwrap_or(-1),
+                            String::from_utf8_lossy(&o.stderr).trim()
+                        )),
+                        Err(e) => Err(format!("Lancement de SumatraPDF impossible : {}", e)),
+                    }
+                } else if pages_spec.trim().is_empty() && copies == 1 && !monochrome {
+                    if let Some(edge) = trouver_edge() {
+                        match Command::new(&edge)
+                            .args([
+                                "--headless",
+                                &format!("--print-to-printer={}", nom_imprimante),
+                                &pdf.to_string_lossy(),
+                            ])
+                            .creation_flags(CREATE_NO_WINDOW)
+                            .output()
+                        {
+                            Ok(o) if o.status.success() => Ok("Document transmis a l'imprimante".to_string()),
+                            Ok(o) => Err(format!("Edge a echoue (code {})", o.status.code().unwrap_or(-1))),
+                            Err(e) => Err(format!("Lancement Edge impossible : {}", e)),
+                        }
+                    } else {
+                        Err("Aucun moteur PDF trouve. Placez SumatraPDF.exe dans le dossier bin/.".into())
                     }
                 } else {
-                    Err("Aucun moteur PDF trouve. Placez SumatraPDF.exe dans le dossier bin/.".into())
+                    Err("SumatraPDF est necessaire pour respecter les pages selectionnees, le nombre de copies et le mode noir et blanc. Placez SumatraPDF.exe dans le dossier bin/.".into())
                 }
+            } else if let Some(err) = erreur_conversion {
+                Err(err)
             } else {
-                Err("SumatraPDF est necessaire pour respecter les pages selectionnees, le nombre de copies et le mode noir et blanc. Placez SumatraPDF.exe dans le dossier bin/.".into())
-            }
-        } else if let Some(err) = erreur_conversion {
-            Err(err)
-        } else {
-            let chemin_ps = echapper_chaine_powershell(&chemin.to_string_lossy());
-            let script = if monochrome {
-                format!(
-                    "$ErrorActionPreference='Stop'; try {{ Start-Process -FilePath '{0}' -Verb Print -ArgumentList 'monochrome'; exit 0 }} catch {{ Start-Process -FilePath '{0}' -Verb Print; exit 0 }}",
-                    chemin_ps,
-                )
-            } else {
-                format!(
-                    "$ErrorActionPreference='Stop'; try {{ Start-Process -FilePath '{0}' -Verb Print; exit 0 }} catch {{ Write-Output $_.Exception.Message; exit 4 }}",
-                    chemin_ps,
-                )
+                let chemin_ps = echapper_chaine_powershell(&chemin.to_string_lossy());
+                let script = if monochrome {
+                    format!(
+                        "$ErrorActionPreference='Stop'; try {{ Start-Process -FilePath '{0}' -Verb Print -ArgumentList 'monochrome'; exit 0 }} catch {{ Start-Process -FilePath '{0}' -Verb Print; exit 0 }}",
+                        chemin_ps,
+                    )
+                } else {
+                    format!(
+                        "$ErrorActionPreference='Stop'; try {{ Start-Process -FilePath '{0}' -Verb Print; exit 0 }} catch {{ Write-Output $_.Exception.Message; exit 4 }}",
+                        chemin_ps,
+                    )
+                };
+                match powershell_invisible(&script) {
+                    Ok(o) if o.status.success() => Ok("Document transmis a l'imprimante".to_string()),
+                    Ok(o) => {
+                        let msg = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                        Err(if msg.is_empty() {
+                            "Aucune application associee a ce format sur le poste hote.".to_string()
+                        } else {
+                            msg
+                        })
+                    }
+                    Err(e) => Err(format!("Erreur systeme : {}", e)),
+                }
             };
-            match powershell_invisible(&script) {
-                Ok(o) if o.status.success() => Ok("Document transmis a l'imprimante".to_string()),
-                Ok(o) => {
-                    let msg = String::from_utf8_lossy(&o.stdout).trim().to_string();
-                    Err(if msg.is_empty() {
-                        "Aucune application associee a ce format sur le poste hote.".to_string()
-                    } else {
-                        msg
-                    })
-                }
-                Err(e) => Err(format!("Erreur systeme : {}", e)),
-            }
-        };
 
-        if pdf_temporaire {
-            if let Some(pdf) = chemin_pdf {
-                let _ = std::fs::remove_file(pdf);
+            if pdf_temporaire {
+                if let Some(pdf) = chemin_pdf {
+                    let _ = std::fs::remove_file(pdf);
+                }
             }
-        }
+            res
+        };
 
         let (statut, message) = match resultat {
             Ok(message) => (Statut::Imprime, message),
@@ -402,34 +518,8 @@ pub fn compter_pages_pdf(chemin: &PathBuf) -> u32 {
     maximum
 }
 
-fn lire_entree_zip(chemin: &Path, nom: &str) -> Option<String> {
-    let fichier = std::fs::File::open(chemin).ok()?;
-    let mut archive = zip::ZipArchive::new(fichier).ok()?;
-    let mut entree = archive.by_name(nom).ok()?;
-    let mut tampon = Vec::new();
-    entree.read_to_end(&mut tampon).ok()?;
-    Some(String::from_utf8_lossy(&tampon).to_string())
-}
-
-fn lire_slides_pptx(chemin: &Path) -> Option<u32> {
-    let contenu = lire_entree_zip(chemin, "ppt/presentation.xml")?;
-    let mut compte = 0u32;
-    let mut reste = contenu.as_str();
-    while let Some(pos) = reste.find("<p:sldId ") {
-        compte += 1;
-        reste = &reste[pos + 9..];
-    }
-    if compte > 0 {
-        Some(compte)
-    } else {
-        None
-    }
-}
-
-
-fn compter_pages_excel(chemin: &str, imprimante: &str) -> Option<u32> {
+fn compter_feuilles_excel(chemin: &str) -> Option<u32> {
     let chemin_esc = chemin.replace('\'', "''");
-    let imprimante_esc = imprimante.replace('\'', "''");
     let script = format!(
         r#"$ErrorActionPreference='Stop'
 $x = $null
@@ -438,12 +528,8 @@ try {{
   $x = New-Object -ComObject Excel.Application
   $x.Visible = $false
   $x.DisplayAlerts = $false
-  if ('{imp}' -ne '') {{ try {{ $x.ActivePrinter = '{imp}' }} catch {{}} }}
   $w = $x.Workbooks.Open('{chemin}', 0, $true)
-  $total = 0
-  foreach ($sheet in $w.Worksheets) {{
-    try {{ $total += $sheet.PageSetup.Pages.Count }} catch {{}}
-  }}
+  $total = $w.Worksheets.Count
   try {{ $w.Close($false) }} catch {{}}
   try {{ $x.Quit() }} catch {{}}
   if ($total -gt 0) {{ Write-Output $total; exit 0 }}
@@ -453,7 +539,6 @@ try {{
   if ($x -ne $null) {{ try {{ $x.Quit() }} catch {{}} }}
   exit 1
 }}"#,
-        imp = imprimante_esc,
         chemin = chemin_esc
     );
     let mut enfant = Command::new("powershell")
@@ -482,6 +567,30 @@ try {{
             }
             Err(_) => return None,
         }
+    }
+}
+
+fn lire_entree_zip(chemin: &Path, nom: &str) -> Option<String> {
+    let fichier = std::fs::File::open(chemin).ok()?;
+    let mut archive = zip::ZipArchive::new(fichier).ok()?;
+    let mut entree = archive.by_name(nom).ok()?;
+    let mut tampon = Vec::new();
+    entree.read_to_end(&mut tampon).ok()?;
+    Some(String::from_utf8_lossy(&tampon).to_string())
+}
+
+fn lire_slides_pptx(chemin: &Path) -> Option<u32> {
+    let contenu = lire_entree_zip(chemin, "ppt/presentation.xml")?;
+    let mut compte = 0u32;
+    let mut reste = contenu.as_str();
+    while let Some(pos) = reste.find("<p:sldId ") {
+        compte += 1;
+        reste = &reste[pos + 9..];
+    }
+    if compte > 0 {
+        Some(compte)
+    } else {
+        None
     }
 }
 
@@ -545,18 +654,17 @@ pub fn compter_pages_document(chemin: &PathBuf, imprimante: &str) -> Result<u32,
     let nombre = if extension == "pdf" {
         compter_pages_pdf(chemin)
     } else if est_document_word(&extension) {
-        let pdf = convertir_word_en_pdf(chemin, imprimante)?;
+        let pdf = convertir_word_en_pdf(chemin, imprimante, Orientation::Portrait)?;
         let nombre = compter_pages_pdf(&pdf);
         let _ = std::fs::remove_file(&pdf);
         nombre
+    } else if est_document_excel(&extension) {
+        compter_feuilles_excel(&chemin_str).unwrap_or(1)
     } else {
         match extension.as_str() {
             "pptx" | "pptm" | "potx" | "potm" => lire_slides_pptx(chemin)
                 .or_else(|| compter_pages_powerpoint(&chemin_str))
                 .unwrap_or(1),
-            "xlsx" | "xlsm" | "xltx" | "xltm" | "xls" | "xlsb" | "ods" | "csv" => {
-                compter_pages_excel(&chemin_str, imprimante).unwrap_or(1)
-            }
             "ppt" | "pot" | "odp" => compter_pages_powerpoint(&chemin_str).unwrap_or(1),
             _ => 1,
         }
@@ -566,7 +674,7 @@ pub fn compter_pages_document(chemin: &PathBuf, imprimante: &str) -> Result<u32,
         Ok(nombre)
     } else {
         Err(format!(
-            "Impossible de determiner le nombre de pages de « {} ».",
+            "Impossible de determiner le nombre de pages/feuilles de « {} ».",
             chemin.file_name().unwrap_or_default().to_string_lossy()
         ))
     }

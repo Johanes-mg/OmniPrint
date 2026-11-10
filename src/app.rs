@@ -12,7 +12,7 @@ use crate::pare_feu;
 use crate::plage_pages::{formater_pages, ModePages, SelectionPages};
 use crate::printer;
 use crate::reseau_utils;
-use crate::session::{ModeCouleur, Session};
+use crate::session::{ModeCouleur, Orientation, Session};
 use crate::theme::{self, badge, bouton_icone, separateur, Palette, PaletteClaire};
 use crate::web::{self, EtatServeur};
 
@@ -246,6 +246,9 @@ impl App {
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_default();
 
+        let ext = chemin.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+        let est_feuille = matches!(ext.as_str(), "xlsx" | "xlsm" | "xltx" | "xltm" | "xls" | "xlsb" | "ods" | "csv");
+
         let existant = {
             let j = self.journal.lock().unwrap();
             j.entrees
@@ -271,7 +274,7 @@ impl App {
                     horodatage: chrono::Local::now(),
                     statut: Statut::EnAttente,
                     message: chemin.to_string_lossy().to_string(),
-                    selection: SelectionPages::default(),
+                    selection: SelectionPages { est_feuille, ..SelectionPages::default() },
                 });
             }
         }
@@ -303,6 +306,7 @@ impl App {
         });
 
         self.popup_cible = Some(chemin.clone());
+        self.selection_locale.est_feuille = est_feuille;
         self.popup_cochees = if self.selection_locale.mode == ModePages::Personnalise {
             self.selection_locale.pages_cochees.clone()
         } else {
@@ -326,10 +330,14 @@ impl App {
         let nom = self.session.nom_utilisateur.clone();
         for chemin in self.fichiers_choisis.clone() {
             let chemin_str = chemin.to_string_lossy().to_string();
+            let ext = chemin.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+            let est_feuille = matches!(ext.as_str(), "xlsx" | "xlsm" | "xltx" | "xltm" | "xls" | "xlsb" | "ods" | "csv");
+            
             let selection = SelectionPages {
                 mode: self.selection_locale.mode.clone(),
                 pages_cochees: self.selection_locale.pages_cochees.clone(),
                 copies: self.selection_locale.copies_effectives(),
+                est_feuille,
             };
             let nom_fichier = chemin
                 .file_name()
@@ -405,6 +413,7 @@ impl App {
     fn imprimer_file(&mut self) {
         let imprimante = self.session.nom_imprimante.clone();
         let mode = self.session.mode_couleur;
+        let orientation = self.session.orientation;
         if imprimante.is_empty() {
             self.message_statut = "Choisissez d'abord une imprimante.".into();
             return;
@@ -451,8 +460,10 @@ impl App {
                 e.id.clone(),
                 self.journal.clone(),
                 mode,
+                orientation,
                 spec,
                 e.selection.copies_effectives(),
+                e.selection.est_feuille,
             );
             impression_lancee = true;
         }
@@ -840,8 +851,9 @@ impl App {
         let texte_doux = self.couleur_texte_doux();
         let accent_fonce = self.couleur_accent_fonce();
 
+        let mot_page = if self.selection_locale.est_feuille { "Feuilles" } else { "Pages" };
         ui.label(
-            egui::RichText::new("Pages à imprimer")
+            egui::RichText::new(format!("{} à imprimer", mot_page))
                 .size(12.0)
                 .color(texte_doux),
         );
@@ -850,14 +862,14 @@ impl App {
         ui.horizontal(|ui| {
             let mut nouveau_mode = self.selection_locale.mode.clone();
             let label_mode = match self.selection_locale.mode {
-                ModePages::Toutes => "Toutes les pages",
-                ModePages::Personnalise => "Sélection par case",
+                ModePages::Toutes => format!("Toutes les {}", mot_page.to_lowercase()),
+                ModePages::Personnalise => format!("Sélection par case"),
             };
             egui::ComboBox::from_id_source("combo_mode_pages")
                 .selected_text(label_mode)
                 .width(220.0)
                 .show_ui(ui, |ui| {
-                    if ui.selectable_label(matches!(nouveau_mode, ModePages::Toutes), "Toutes les pages").clicked() {
+                    if ui.selectable_label(matches!(nouveau_mode, ModePages::Toutes), format!("Toutes les {}", mot_page.to_lowercase())).clicked() {
                         nouveau_mode = ModePages::Toutes;
                     }
                     if ui.selectable_label(matches!(nouveau_mode, ModePages::Personnalise), "Sélection par case").clicked() {
@@ -875,7 +887,7 @@ impl App {
                 if ui
                     .add(
                         egui::Button::new(
-                            egui::RichText::new("Choisir les pages…").size(13.0).color(egui::Color32::WHITE),
+                            egui::RichText::new(format!("Choisir les {}…", mot_page.to_lowercase())).size(13.0).color(egui::Color32::WHITE),
                         )
                         .fill(accent_fonce),
                     )
@@ -929,11 +941,13 @@ impl App {
         let texte_doux = self.couleur_texte_doux();
         let couleur_erreur = self.couleur_erreur();
 
+        let mot_page = if self.selection_locale.est_feuille { "feuille(s)" } else { "page(s)" };
+
         let mut ouvert = self.popup_selection_ouverte;
         let mut valider = false;
         let mut annuler = false;
 
-        egui::Window::new("Choisir les pages")
+        egui::Window::new(format!("Choisir les {}", if self.selection_locale.est_feuille { "feuilles" } else { "pages" }))
             .collapsible(false)
             .resizable(true)
             .open(&mut ouvert)
@@ -951,7 +965,7 @@ impl App {
                 ui.set_min_width(480.0);
                 ui.horizontal(|ui| {
                     if pret {
-                        ui.label(egui::RichText::new(format!("Document : {} page(s)", total)).size(14.0).color(texte));
+                        ui.label(egui::RichText::new(format!("Document : {} {}", total, mot_page)).size(14.0).color(texte));
                     } else if let Some(erreur) = erreur_pages.as_ref() {
                         ui.label(egui::RichText::new(format!("Analyse impossible : {}", erreur)).size(13.0).color(couleur_erreur));
                     } else {
@@ -976,7 +990,7 @@ impl App {
                             if let Some(erreur) = erreur_pages.as_ref() {
                                 ui.label(egui::RichText::new(erreur).size(12.0).color(couleur_erreur));
                             } else {
-                                ui.label(egui::RichText::new("Le nombre de pages est en cours de calcul. La grille s'affichera dès que le document sera analysé.").size(12.0).color(texte_doux));
+                                ui.label(egui::RichText::new("Le nombre est en cours de calcul. La grille s'affichera dès que le document sera analysé.").size(12.0).color(texte_doux));
                             }
                         } else {
                             let par_ligne = 8usize;
@@ -1005,8 +1019,9 @@ impl App {
                 ui.horizontal(|ui| {
                     ui.label(
                         egui::RichText::new(format!(
-                            "{} page(s) sélectionnée(s) — {}",
+                            "{} {} sélectionnée(s) — {}",
                             self.popup_cochees.len(),
+                            mot_page,
                             if self.popup_cochees.is_empty() {
                                 "aucune".to_string()
                             } else {
@@ -1037,8 +1052,9 @@ impl App {
             self.selection_locale.pages_cochees = self.popup_cochees.clone();
             self.popup_selection_ouverte = false;
             self.message_statut = format!(
-                "Sélection enregistrée : {} page(s).",
-                self.popup_cochees.len()
+                "Sélection enregistrée : {} {}.",
+                self.popup_cochees.len(),
+                mot_page
             );
         }
         if annuler || !ouvert {
@@ -1301,13 +1317,8 @@ impl App {
             }
         });
         ui.add_space(6.0);
-        ui.label(
-            egui::RichText::new("Mode d'impression par défaut")
-                .size(12.0)
-                .color(self.couleur_texte_doux()),
-        );
-        ui.add_space(2.0);
         ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("Mode d'impression").size(12.0).color(self.couleur_texte_doux()));
             let mut courant = self.session.mode_couleur;
             let btn_couleur = egui::Button::new(
                 egui::RichText::new("Couleur")
@@ -1345,6 +1356,49 @@ impl App {
             }
             if courant != self.session.mode_couleur {
                 self.session.mode_couleur = courant;
+                self.session.sauvegarder();
+            }
+        });
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("Orientation").size(12.0).color(self.couleur_texte_doux()));
+            let mut courant = self.session.orientation;
+            let btn_portrait = egui::Button::new(
+                egui::RichText::new("Portrait")
+                    .size(13.0)
+                    .color(if courant == Orientation::Portrait {
+                        egui::Color32::WHITE
+                    } else {
+                        self.couleur_texte()
+                    }),
+            )
+            .fill(if courant == Orientation::Portrait {
+                self.couleur_accent_fonce()
+            } else {
+                self.couleur_carte()
+            });
+            if ui.add(btn_portrait).clicked() {
+                courant = Orientation::Portrait;
+            }
+            let btn_paysage = egui::Button::new(
+                egui::RichText::new("Paysage")
+                    .size(13.0)
+                    .color(if courant == Orientation::Paysage {
+                        egui::Color32::WHITE
+                    } else {
+                        self.couleur_texte()
+                    }),
+            )
+            .fill(if courant == Orientation::Paysage {
+                self.couleur_accent_fonce()
+            } else {
+                self.couleur_carte()
+            });
+            if ui.add(btn_paysage).clicked() {
+                courant = Orientation::Paysage;
+            }
+            if courant != self.session.orientation {
+                self.session.orientation = courant;
                 self.session.sauvegarder();
             }
         });

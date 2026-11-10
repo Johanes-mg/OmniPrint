@@ -26,6 +26,18 @@ impl Default for ModeCouleur {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Orientation {
+    Portrait,
+    Paysage,
+}
+
+impl Default for Orientation {
+    fn default() -> Self {
+        Orientation::Portrait
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Session {
     pub role: Role,
@@ -38,6 +50,8 @@ pub struct Session {
     pub mode_sombre: bool,
     #[serde(default)]
     pub mode_couleur: ModeCouleur,
+    #[serde(default)]
+    pub orientation: Orientation,
 }
 
 fn mode_sombre_defaut() -> bool {
@@ -55,6 +69,7 @@ impl Default for Session {
             taille_fenetre: None,
             mode_sombre: true,
             mode_couleur: ModeCouleur::Couleur,
+            orientation: Orientation::Portrait,
         }
     }
 }

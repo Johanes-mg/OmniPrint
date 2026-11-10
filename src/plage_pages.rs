@@ -17,6 +17,8 @@ pub struct SelectionPages {
     pub mode: ModePages,
     pub pages_cochees: Vec<u32>,
     pub copies: u32,
+    #[serde(default)]
+    pub est_feuille: bool,
 }
 
 impl Default for SelectionPages {
@@ -25,6 +27,7 @@ impl Default for SelectionPages {
             mode: ModePages::Toutes,
             pages_cochees: Vec::new(),
             copies: 1,
+            est_feuille: false,
         }
     }
 }
@@ -35,7 +38,11 @@ impl SelectionPages {
             ModePages::Toutes => Ok((1..=total).collect()),
             ModePages::Personnalise => {
                 if self.pages_cochees.is_empty() {
-                    return Err("Aucune page sélectionnée.".into());
+                    return Err(if self.est_feuille {
+                        "Aucune feuille sélectionnée.".into()
+                    } else {
+                        "Aucune page sélectionnée.".into()
+                    });
                 }
                 let mut v: Vec<u32> = self
                     .pages_cochees
@@ -46,7 +53,11 @@ impl SelectionPages {
                 v.sort_unstable();
                 v.dedup();
                 if v.is_empty() {
-                    return Err("Aucune page valide.".into());
+                    return Err(if self.est_feuille {
+                        "Aucune feuille valide.".into()
+                    } else {
+                        "Aucune page valide.".into()
+                    });
                 }
                 Ok(v)
             }
@@ -78,12 +89,13 @@ impl SelectionPages {
     }
 
     pub fn resume(&self, total: u32) -> String {
+        let mot = if self.est_feuille { "feuille(s)" } else { "page(s)" };
         match self.mode {
             ModePages::Toutes => {
                 if total > 0 {
-                    format!("Toutes ({} pages)", total)
+                    format!("Toutes ({} {})", total, mot)
                 } else {
-                    "Toutes les pages".into()
+                    format!("Toutes les {}", mot)
                 }
             },
             ModePages::Personnalise => {
