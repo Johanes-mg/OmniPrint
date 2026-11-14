@@ -185,12 +185,17 @@ impl App {
         if self.serveur_demarre { return; }
         let (tx, rx) = channel::<()>();
         let logo = std::fs::read("images/logo.png").unwrap_or_default();
+        let icone_clair = std::fs::read("images/light.png").unwrap_or_default();
+        let icone_sombre = std::fs::read("images/dark.png").unwrap_or_default();
+        
         let etat = EtatServeur {
             journal: self.journal.clone(),
             dossier: crate::config::chemin_documents_recus(),
             tx,
             imprimante: self.imprimante_partagee.clone(),
             logo: Arc::new(logo),
+            icone_clair: Arc::new(icone_clair),
+            icone_sombre: Arc::new(icone_sombre),
         };
         let mut port_essaye = self.session.port;
         let port_max = self.session.port.saturating_add(crate::config::PORT_RECHERCHE_MAX);

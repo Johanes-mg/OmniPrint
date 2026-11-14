@@ -17,6 +17,8 @@ pub struct EtatServeur {
     pub tx: Sender<()>,
     pub imprimante: Arc<Mutex<String>>,
     pub logo: Arc<Vec<u8>>,
+    pub icone_clair: Arc<Vec<u8>>,
+    pub icone_sombre: Arc<Vec<u8>>,
 }
 
 pub fn demarrer(port: u16, etat: EtatServeur) -> Result<u16, String> {
@@ -45,6 +47,14 @@ fn traiter(requete: tiny_http::Request, etat: &EtatServeur) {
     }
     if methode == Method::Get && url == "/logo.png" {
         let _ = repondre_png(requete, &etat.logo);
+        return;
+    }
+    if methode == Method::Get && url == "/light.png" {
+        let _ = repondre_png(requete, &etat.icone_clair);
+        return;
+    }
+    if methode == Method::Get && url == "/dark.png" {
+        let _ = repondre_png(requete, &etat.icone_sombre);
         return;
     }
     if methode == Method::Post && url == "/imprimer" {
@@ -584,17 +594,46 @@ const PAGE_CLIENT: &str = r#"<!DOCTYPE html>
 <title>OmniPrint</title>
 <link rel="icon" type="image/png" href="/logo.png">
 <style>
-:root { color-scheme: dark; --fond: #101218; --carte: #181b24; --bordure: #2d3242; --texte: #e8ebf5; --texte-doux: #96a2b2; --accent: #5a9cff; --accent-fonce: #3a6ec8; --succes: #48c78e; --erreur: #e85e5e; }
+:root {
+  --fond: #f4f6fa;
+  --carte: #ffffff;
+  --bordure: #d2d8e4;
+  --texte: #1c202c;
+  --texte-doux: #606a80;
+  --accent: #2864d2;
+  --accent-fonce: #2252b0;
+  --succes: #229e6c;
+  --erreur: #c84040;
+  color-scheme: light;
+}
+[data-theme="dark"] {
+  --fond: #101218;
+  --carte: #181b24;
+  --bordure: #2d3242;
+  --texte: #e8ebf5;
+  --texte-doux: #96a2b2;
+  --accent: #5a9cff;
+  --accent-fonce: #3a6ec8;
+  --succes: #48c78e;
+  --erreur: #e85e5e;
+  color-scheme: dark;
+}
+
 * { box-sizing: border-box; }
 html, body { margin: 0; padding: 0; min-height: 100%; }
-body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; background: var(--fond); color: var(--texte); padding: 32px 20px 48px; }
-header { width: 100%; max-width: 720px; margin: 0 auto 24px; text-align: center; }
-header img { display: block; margin: 0 auto 12px; }
+body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; background: var(--fond); color: var(--texte); padding: 32px 20px 48px; transition: background 0.2s, color 0.2s; }
+header { width: 100%; max-width: 720px; margin: 0 auto 24px; text-align: center; position: relative; }
+header img.logo { display: block; margin: 0 auto 12px; }
 header h1 { font-size: 24px; font-weight: 600; margin: 0; letter-spacing: 0.2px; }
 header .soustitre { color: var(--texte-doux); font-size: 14px; margin-top: 6px; }
+
+.btn-theme { position: absolute; top: 0; right: 0; background: var(--carte); border: 1px solid var(--bordure); border-radius: 50%; width: 40px; height: 40px; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: all 0.2s; padding: 0; }
+.btn-theme:hover { background: var(--fond); }
+.btn-theme img { display: block; width: 20px; height: 20px; }
+
 main { width: 100%; max-width: 720px; margin: 0 auto; text-align: center; }
-.zone { border: 2px dashed var(--bordure); border-radius: 14px; padding: 44px 24px; text-align: center; cursor: pointer; background: var(--carte); }
-.zone.survol { border-color: var(--accent); background: #1b2030; }
+.zone { border: 2px dashed var(--bordure); border-radius: 14px; padding: 44px 24px; text-align: center; cursor: pointer; background: var(--carte); transition: all 0.2s; }
+.zone.survol { border-color: var(--accent); background: var(--fond); }
 .zone h2 { font-size: 17px; margin: 0 0 8px; }
 .zone p { margin: 0; color: var(--texte-doux); font-size: 13px; }
 .zone .bouton { margin-top: 16px; padding: 10px 20px; border-radius: 8px; background: var(--accent-fonce); color: #fff; border: none; font-size: 14px; cursor: pointer; }
@@ -604,16 +643,14 @@ input[type=text], input[type=number], select { width: 100%; padding: 10px 12px; 
 .mode { margin-top: 18px; text-align: left; }
 .mode .titre { font-size: 13px; color: var(--texte-doux); margin-bottom: 6px; }
 
-/* Styles des boutons de sélection (cases) */
 .choix-groupe { display: flex; gap: 8px; margin-top: 6px; }
 .choix-case { flex: 1; text-align: center; padding: 10px 12px; background: var(--carte); border: 1px solid var(--bordure); border-radius: 8px; font-size: 13px; color: var(--texte); cursor: pointer; user-select: none; transition: all 0.2s ease; }
-.choix-case:hover { background: #1f2433; }
+.choix-case:hover { background: var(--fond); }
 .choix-case input { display: none; }
 .choix-case.actif { background: var(--accent-fonce); border-color: var(--accent); color: #fff; }
 
-/* Styles de la liste et fenêtre d'aperçu */
 .liste { margin-top: 22px; display: flex; flex-direction: column; gap: 10px; text-align: left; }
-.item { display: flex; align-items: center; gap: 12px; padding: 12px 14px; background: var(--carte); border: 1px solid var(--bordure); border-radius: 8px; font-size: 13px; flex-wrap: wrap; }
+.item { display: flex; align-items: center; gap: 12px; padding: 12px 14px; background: var(--carte); border: 1px solid var(--bordure); border-radius: 8px; font-size: 13px; flex-wrap: wrap; transition: all 0.2s; }
 .item .nom { flex: 1; min-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .item .info { color: var(--texte-doux); font-size: 12px; }
 .item .etat { font-weight: 500; margin-left: auto; }
@@ -625,21 +662,20 @@ input[type=text], input[type=number], select { width: 100%; padding: 10px 12px; 
 .item button.danger { border-color: var(--erreur); color: var(--erreur); }
 .item button.danger:hover { background: var(--erreur); color: #fff; }
 .pages-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(44px, 1fr)); gap: 6px; margin-top: 8px; max-height: 200px; overflow-y: auto; padding: 6px; background: var(--carte); border: 1px solid var(--bordure); border-radius: 8px; }
-.pages-grid label { display: flex; align-items: center; justify-content: center; padding: 6px 0; background: #1f2433; border: 1px solid var(--bordure); border-radius: 6px; font-size: 12px; cursor: pointer; }
+.pages-grid label { display: flex; align-items: center; justify-content: center; padding: 6px 0; background: var(--fond); border: 1px solid var(--bordure); border-radius: 6px; font-size: 12px; cursor: pointer; }
 .pages-grid input { display: none; }
 .pages-grid input:checked + span { color: var(--accent); font-weight: 700; }
-.pages-grid label:has(input:checked) { border-color: var(--accent); background: #1b2030; }
+.pages-grid label:has(input:checked) { border-color: var(--accent); background: var(--carte); }
 .ligne-double { display: flex; gap: 12px; }
 .ligne-double > div { flex: 1; }
 footer { margin: 36px auto 0; color: var(--texte-doux); font-size: 12px; text-align: center; max-width: 720px; }
 
-/* Modal Aperçu */
 #modal-apercu { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.85); z-index: 1000; overflow-y: auto; padding: 20px; }
 #modal-apercu .contenu { max-width: 800px; margin: 0 auto; background: var(--carte); border: 1px solid var(--bordure); border-radius: 12px; padding: 20px; position: relative; }
 #modal-apercu .btn-fermer { position: absolute; top: 10px; right: 10px; background: var(--erreur); color: #fff; border: none; border-radius: 6px; padding: 6px 12px; cursor: pointer; font-weight: bold; }
 #modal-apercu h3 { margin-top: 0; margin-bottom: 20px; }
 #apercu-pages { display: flex; flex-direction: column; gap: 20px; align-items: center; }
-#apercu-pages img { max-width: 100%; height: auto; box-shadow: 0 4px 12px rgba(0,0,0,0.5); border: 1px solid var(--bordure); }
+#apercu-pages img { max-width: 100%; height: auto; box-shadow: 0 4px 12px rgba(0,0,0,0.5); border: 1px solid var(--bordure); background: #fff; }
 #apercu-pages .chargement { color: var(--texte-doux); font-size: 14px; margin: 10px 0; }
 
 @media (max-width: 520px) {
@@ -652,7 +688,10 @@ footer { margin: 36px auto 0; color: var(--texte-doux); font-size: 12px; text-al
 </head>
 <body>
 <header>
-  <img src="/logo.png" alt="Logo" width="50">
+  <button id="btn-theme" class="btn-theme" title="Changer de thème">
+    <img src="/dark.png" alt="Thème" id="img-theme">
+  </button>
+  <img class="logo" src="/logo.png" alt="Logo" width="50">
   <h1>OmniPrint</h1>
   <div class="soustitre">Envoyez et imprimez vos documents</div>
 </header>
@@ -724,6 +763,27 @@ footer { margin: 36px auto 0; color: var(--texte-doux); font-size: 12px; text-al
 
 <script>
 (function () {
+  var btnTheme = document.getElementById('btn-theme');
+  var imgTheme = document.getElementById('img-theme');
+  var currentTheme = localStorage.getItem('theme') || 'light';
+
+  function appliquerTheme(theme) {
+    document.documentElement.setAttribute('data-theme', theme);
+    localStorage.setItem('theme', theme);
+    if (theme === 'dark') {
+      imgTheme.src = '/light.png';
+    } else {
+      imgTheme.src = '/dark.png';
+    }
+  }
+
+  appliquerTheme(currentTheme);
+
+  btnTheme.addEventListener('click', function() {
+    currentTheme = currentTheme === 'dark' ? 'light' : 'dark';
+    appliquerTheme(currentTheme);
+  });
+
   var zone = document.getElementById('zone');
   var bouton = document.getElementById('bouton-ouvrir');
   var input = document.getElementById('fichier');
@@ -806,14 +866,12 @@ footer { margin: 36px auto 0; color: var(--texte-doux); font-size: 12px; text-al
     return arr;
   }
 
-  // Ouvre la modale et charge toutes les pages
   function ouvrirApercuGlobal(id) {
     var modal = document.getElementById('modal-apercu');
     var conteneur = document.getElementById('apercu-pages');
     conteneur.innerHTML = '<div class="chargement">Chargement de l\'aperçu complet...</div>';
     modal.style.display = 'block';
 
-    // Demande le nombre total de pages au serveur
     var xhr = new XMLHttpRequest();
     xhr.open('GET', '/apercu-total?id=' + encodeURIComponent(id), true);
     xhr.onload = function() {
@@ -825,7 +883,7 @@ footer { margin: 36px auto 0; color: var(--texte-doux); font-size: 12px; text-al
           var img = document.createElement('img');
           img.src = '/apercu?id=' + encodeURIComponent(id) + '&page=' + p;
           img.alt = 'Page ' + p;
-          img.loading = 'lazy'; // Charge les images au fur et à mesure du défilement
+          img.loading = 'lazy';
           conteneur.appendChild(img);
         }
       } else {
