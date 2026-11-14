@@ -7,11 +7,11 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 pub const WORKER_FLAG: &str = "--admin-worker";
 
 pub fn run_worker(args: &[String]) -> i32 {
-    if args.len() < 2 {
+    if args.is_empty() {
         return 2;
     }
     let script_path = Path::new(&args[0]);
-    let done_path = Path::new(&args[1]);
+    let done_path = script_path.with_extension("done");
 
     let est_ps1 = script_path
         .extension()
@@ -42,27 +42,40 @@ pub fn run_worker(args: &[String]) -> i32 {
 
     let (code, message) = match resultat {
         Ok(o) if o.status.success() => (0, "OK".to_string()),
-        Ok(o) => (1, format!("ERR: code {}", o.status.code().unwrap_or(-1))),
+        Ok(o) => {
+            let out = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            let err = String::from_utf8_lossy(&o.stderr).trim().to_string();
+            let mut msg = format!("ERR code {}", o.status.code().unwrap_or(-1));
+            if !out.is_empty() {
+                msg.push_str(" | ");
+                msg.push_str(&out);
+            }
+            if !err.is_empty() {
+                msg.push_str(" | ");
+                msg.push_str(&err);
+            }
+            (1, msg)
+        }
         Err(e) => (1, format!("ERR: {}", e)),
     };
 
-    let _ = std::fs::write(done_path, &message);
+    let _ = std::fs::write(&done_path, &message);
     code
 }
 
 pub fn executer_en_admin(script: &Path) -> Result<(), String> {
     let exe = std::env::current_exe()
         .map_err(|e| format!("Exécutable introuvable : {}", e))?;
-    let id = uuid::Uuid::new_v4();
-    let done = std::env::temp_dir().join(format!("omniprint_done_{}.txt", id));
+    let done = script.with_extension("done");
+    let _ = std::fs::remove_file(&done);
 
     let exe_s = exe.display().to_string().replace('\'', "''");
     let script_s = script.display().to_string().replace('\'', "''");
-    let done_s = done.display().to_string().replace('\'', "''");
 
+    // Transmission propre de l'argument (Start-Process gère les espaces nativement)
     let cmd = format!(
-        "Start-Process -FilePath '{}' -ArgumentList '{}','{}','{}' -Verb RunAs -Wait",
-        exe_s, WORKER_FLAG, script_s, done_s
+        "Start-Process -FilePath '{}' -ArgumentList '{}', '{}' -Verb RunAs -Wait",
+        exe_s, WORKER_FLAG, script_s
     );
 
     let sortie = Command::new("powershell")

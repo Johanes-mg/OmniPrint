@@ -1,8 +1,8 @@
 /target
 /Installeur
-/code_source.txt
+codesource_omniprint.txt
 installer.iss
 *.exe
 *.pdb
 *.log
-
+/codesource_omniprint.txt

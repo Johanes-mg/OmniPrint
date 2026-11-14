@@ -10,12 +10,12 @@ use parking_lot::RwLock;
 
 use crate::journal::{Entree, Journal, Statut};
 use crate::mdns;
-use crate::pare_feu;
 use crate::partage;
 use crate::plage_pages::{formater_pages, ModePages, SelectionPages};
 use crate::printer;
 use crate::reseau_utils;
 use crate::session::{ModeCouleur, Orientation, Session};
+use crate::setup;
 use crate::theme::{self, badge, bouton_icone, separateur, Palette, PaletteClaire};
 use crate::web::{self, EtatServeur};
 
@@ -34,6 +34,8 @@ pub struct App {
     etat_partage: String,
     chemin_partage: String,
     rx_web: Option<Receiver<()>>,
+    rx_setup: Option<Receiver<setup::ResultatConfig>>,
+    setup_en_cours: bool,
     serveur_demarre: bool,
     ip_locale: String,
     port_effectif: u16,
@@ -105,6 +107,8 @@ impl App {
             etat_partage: String::new(),
             chemin_partage,
             rx_web: None,
+            rx_setup: None,
+            setup_en_cours: false,
             serveur_demarre: false,
             ip_locale,
             port_effectif: 0,
@@ -136,7 +140,7 @@ impl App {
         };
         app.reanalyser_entrees_anciennes();
         app.demarrer_serveur();
-        app.lancer_partage_auto();
+        app.configurer_reseau_et_partage(false);
         app
     }
 
@@ -199,10 +203,6 @@ impl App {
                     self.ip_locale = reseau_utils::adresse_ip_locale();
                     self.session.port = port_reel;
                     self.session.sauvegarder();
-                    match pare_feu::assurer_regle(port_reel) {
-                        Ok(_) => { self.etat_pare_feu = "Pare-feu configuré".into(); }
-                        Err(e) => { self.etat_pare_feu = format!("Pare-feu : {}", e); }
-                    }
                     self.daemon_mdns = mdns::publier(port_reel);
                     self.message_statut = format!("Serveur prêt sur le port {}.", port_reel);
                     return;
@@ -213,64 +213,69 @@ impl App {
         self.message_statut = "Aucun port disponible.".into();
     }
 
-    fn lancer_partage_auto(&mut self) {
-        if self.session.nom_imprimante.is_empty() {
-            self.etat_partage = "Aucune imprimante sélectionnée.".into();
+    fn configurer_reseau_et_partage(&mut self, forcer: bool) {
+        if self.port_effectif == 0 || self.setup_en_cours {
             return;
         }
+        
         let imprimante = self.session.nom_imprimante.clone();
         let nom_partage = self.session.nom_partage.clone();
-        self.chemin_partage = partage::chemin_unc(&nom_partage);
-        self.etat_partage = "Activation du partage Windows…".into();
-        let resultat = partage::activer_partage(&imprimante, &nom_partage);
-        match resultat {
-            Ok(_) => {
-                self.etat_partage = format!("Partagée sous {}", self.chemin_partage);
-                self.message_statut = format!("Partage Windows prêt : {}", self.chemin_partage);
-            }
-            Err(e) => {
-                self.etat_partage = format!("Partage : {}", e);
-                self.message_statut = format!("Partage Windows échoué : {}", e);
+        self.chemin_partage = if imprimante.is_empty() {
+            String::new()
+        } else {
+            partage::chemin_unc(&nom_partage)
+        };
+        
+        self.etat_pare_feu = "Configuration en cours…".into();
+        if !imprimante.is_empty() {
+            self.etat_partage = "Configuration en cours…".into();
+        }
+
+        let port = self.port_effectif;
+        let (tx, rx) = channel();
+        self.rx_setup = Some(rx);
+        self.setup_en_cours = true;
+
+        std::thread::spawn(move || {
+            let res = setup::preparer(port, &imprimante, &nom_partage, forcer);
+            let _ = tx.send(res);
+        });
+    }
+
+    fn traiter_evenements_setup(&mut self, ctx: &egui::Context) {
+        if let Some(rx) = &self.rx_setup {
+            if let Ok(resultat) = rx.try_recv() {
+                self.rx_setup = None;
+                self.setup_en_cours = false;
+
+                self.etat_pare_feu = match &resultat.pare_feu {
+                    Ok(_) => "Pare-feu configuré".into(),
+                    Err(e) => format!("Pare-feu : {}", e),
+                };
+                self.etat_partage = if self.session.nom_imprimante.is_empty() {
+                    "Aucune imprimante sélectionnée.".into()
+                } else {
+                    match &resultat.partage {
+                        Ok(_) => format!("Partagée sous {}", self.chemin_partage),
+                        Err(e) => format!("Partage : {}", e),
+                    }
+                };
+                self.message_statut = if resultat.elevation_demandee {
+                    "Configuration réseau et partage appliquée.".into()
+                } else {
+                    format!("Serveur prêt sur le port {}.", self.port_effectif)
+                };
+                ctx.request_repaint();
             }
         }
     }
 
     fn reparer_partage(&mut self) {
-        if self.session.nom_imprimante.is_empty() {
-            self.message_statut = "Sélectionnez d'abord une imprimante.".into();
-            return;
-        }
-        let imprimante = self.session.nom_imprimante.clone();
-        let nom_partage = self.session.nom_partage.clone();
-        self.chemin_partage = partage::chemin_unc(&nom_partage);
-        self.etat_partage = "Réparation du partage…".into();
-        match partage::activer_partage(&imprimante, &nom_partage) {
-            Ok(_) => {
-                self.etat_partage = format!("Partagée sous {}", self.chemin_partage);
-                self.message_statut = format!("Partage réparé : {}", self.chemin_partage);
-            }
-            Err(e) => {
-                self.etat_partage = format!("Partage : {}", e);
-                self.message_statut = format!("Réparation échouée : {}", e);
-            }
-        }
+        self.configurer_reseau_et_partage(true);
     }
 
     fn reparer_reseau(&mut self) {
-        pare_feu::supprimer_toutes_regles();
-        match pare_feu::assurer_regle(self.port_effectif) {
-            Ok(_) => {
-                self.ip_locale = reseau_utils::adresse_ip_locale();
-                self.qr_texture = None;
-                self.qr_adresse.clear();
-                self.etat_pare_feu = "Pare-feu reconfiguré".into();
-                self.message_statut = format!("Accès réseau réparé : http://{}:{}", self.ip_locale, self.port_effectif);
-            }
-            Err(e) => {
-                self.etat_pare_feu = format!("Pare-feu : {}", e);
-                self.message_statut = format!("Réparation échouée : {}", e);
-            }
-        }
+        self.configurer_reseau_et_partage(true);
     }
 
     fn rafraichir_imprimantes(&mut self) {
@@ -732,9 +737,9 @@ impl App {
                         ui.label(egui::RichText::new(&self.etat_partage).size(11.0).color(texte_doux));
                     }
                     ui.add_space(6.0);
-                    if ui.button("Réparer le partage Windows").clicked() { self.reparer_partage(); }
+                    if ui.add_enabled(!self.setup_en_cours, egui::Button::new("Réparer le partage Windows")).clicked() { self.reparer_partage(); }
                     ui.add_space(16.0);
-                    if ui.button("Réparer l'accès réseau (pare-feu)").clicked() { self.reparer_reseau(); }
+                    if ui.add_enabled(!self.setup_en_cours, egui::Button::new("Réparer l'accès réseau (pare-feu)")).clicked() { self.reparer_reseau(); }
                     ui.add_space(8.0);
                     ui.label(egui::RichText::new(&self.etat_pare_feu).size(12.0).color(texte_doux));
                 });
@@ -1042,11 +1047,14 @@ impl App {
             if ui.button("Rafraîchir la liste").clicked() { self.rafraichir_imprimantes(); }
         });
         if changer_imp {
+            let ancienne = self.session.nom_imprimante.clone();
             self.session.nom_imprimante = nouveau_nom.clone();
             *self.imprimante_partagee.lock().unwrap() = nouveau_nom.clone();
             *self.imprimante_ipp.write() = nouveau_nom.clone();
             self.session.sauvegarder();
-            self.lancer_partage_auto();
+            if ancienne != nouveau_nom {
+                self.configurer_reseau_et_partage(false);
+            }
         }
     }
 }
@@ -1054,7 +1062,9 @@ impl App {
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.traiter_evenements();
+        self.traiter_evenements_setup(ctx);
         self.traiter_apercus(ctx);
+        
         let carte = self.couleur_carte(); let bordure = self.couleur_bordure(); let fond = self.couleur_fond(); let texte_doux = self.couleur_texte_doux();
         egui::TopBottomPanel::top("entete").frame(egui::Frame::none().fill(carte).inner_margin(egui::Margin::symmetric(16.0, 10.0)).stroke(egui::Stroke::new(1.0_f32, bordure))).show(ctx, |ui| { self.ui_entete(ui, ctx); });
         egui::TopBottomPanel::bottom("pied").frame(egui::Frame::none().fill(carte).inner_margin(egui::Margin::symmetric(16.0, 8.0)).stroke(egui::Stroke::new(1.0_f32, bordure))).show(ctx, |ui| {

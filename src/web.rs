@@ -578,8 +578,38 @@ label.champ { display: block; margin-top: 22px; font-size: 13px; color: var(--te
 input[type=text], input[type=number], select { width: 100%; padding: 10px 12px; background: var(--carte); color: var(--texte); border: 1px solid var(--bordure); border-radius: 8px; font-size: 14px; margin-top: 6px; text-align: left; }
 .mode { margin-top: 18px; text-align: left; }
 .mode .titre { font-size: 13px; color: var(--texte-doux); margin-bottom: 6px; }
-.mode label { display: inline-flex; align-items: center; gap: 6px; margin-right: 16px; font-size: 13px; cursor: pointer; }
-.mode input[type=radio] { accent-color: var(--accent); }
+
+/* Styles des boutons de sélection (cases) */
+.choix-groupe {
+  display: flex;
+  gap: 8px;
+  margin-top: 6px;
+}
+.choix-case {
+  flex: 1;
+  text-align: center;
+  padding: 10px 12px;
+  background: var(--carte);
+  border: 1px solid var(--bordure);
+  border-radius: 8px;
+  font-size: 13px;
+  color: var(--texte);
+  cursor: pointer;
+  user-select: none;
+  transition: all 0.2s ease;
+}
+.choix-case:hover {
+  background: #1f2433;
+}
+.choix-case input {
+  display: none;
+}
+.choix-case.actif {
+  background: var(--accent-fonce);
+  border-color: var(--accent);
+  color: #fff;
+}
+
 .liste { margin-top: 22px; display: flex; flex-direction: column; gap: 10px; text-align: left; }
 .item { display: flex; align-items: center; gap: 12px; padding: 12px 14px; background: var(--carte); border: 1px solid var(--bordure); border-radius: 8px; font-size: 13px; flex-wrap: wrap; }
 .item .nom { flex: 1; min-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -600,7 +630,13 @@ input[type=text], input[type=number], select { width: 100%; padding: 10px 12px; 
 .ligne-double { display: flex; gap: 12px; }
 .ligne-double > div { flex: 1; }
 footer { margin: 36px auto 0; color: var(--texte-doux); font-size: 12px; text-align: center; max-width: 720px; }
-@media (max-width: 520px) { body { padding: 20px 14px 32px; } .zone { padding: 32px 16px; } .ligne-double { flex-direction: column; } }
+
+@media (max-width: 520px) {
+  body { padding: 20px 14px 32px; }
+  .zone { padding: 32px 16px; }
+  .ligne-double { flex-direction: column; }
+  .choix-groupe { flex-direction: column; }
+}
 </style>
 </head>
 <body>
@@ -617,6 +653,7 @@ footer { margin: 36px auto 0; color: var(--texte-doux); font-size: 12px; text-al
   </div>
   <label class="champ" for="nom">Votre nom (facultatif)</label>
   <input type="text" id="nom" placeholder="Johanes-mg" maxlength="60">
+  
   <div class="ligne-double">
     <div>
       <label class="champ" for="pages-mode">Pages à imprimer</label>
@@ -630,18 +667,32 @@ footer { margin: 36px auto 0; color: var(--texte-doux); font-size: 12px; text-al
       <input type="number" id="copies" min="1" max="999" value="1">
     </div>
   </div>
+
   <div class="ligne-double" style="margin-top: 16px;">
-    <div>
+    <div class="mode">
       <div class="titre">Mode d'impression</div>
-      <label><input type="radio" name="mode" value="couleur" checked> Couleur</label>
-      <label><input type="radio" name="mode" value="noirblanc"> Noir et blanc</label>
+      <div class="choix-groupe">
+        <label class="choix-case actif">
+          <input type="radio" name="mode" value="couleur" checked onchange="majCases('mode')"> Couleur
+        </label>
+        <label class="choix-case">
+          <input type="radio" name="mode" value="noirblanc" onchange="majCases('mode')"> Noir et blanc
+        </label>
+      </div>
     </div>
-    <div>
+    <div class="mode">
       <div class="titre">Orientation</div>
-      <label><input type="radio" name="orientation" value="portrait" checked> Portrait</label>
-      <label><input type="radio" name="orientation" value="paysage"> Paysage</label>
+      <div class="choix-groupe">
+        <label class="choix-case actif">
+          <input type="radio" name="orientation" value="portrait" checked onchange="majCases('orientation')"> Portrait
+        </label>
+        <label class="choix-case">
+          <input type="radio" name="orientation" value="paysage" onchange="majCases('orientation')"> Paysage
+        </label>
+      </div>
     </div>
   </div>
+
   <div id="bloc-selection" style="display:none; margin-top: 16px;">
     <div class="champ" id="titre-selection">Sélection par case (analyse du document en cours...)</div>
     <div class="pages-grid" id="pages-grid"></div>
@@ -665,6 +716,19 @@ footer { margin: 36px auto 0; color: var(--texte-doux); font-size: 12px; text-al
   var visuelCourant = null;
   var totalPagesConnues = 0;
   var estFeuilleCourante = false;
+
+  // Met à jour l'apparence des cases cliquables
+  window.majCases = function(nomGroupe) {
+    var inputs = document.querySelectorAll('input[name="' + nomGroupe + '"]');
+    for (var i = 0; i < inputs.length; i++) {
+      var label = inputs[i].parentElement;
+      if (inputs[i].checked) {
+        label.classList.add('actif');
+      } else {
+        label.classList.remove('actif');
+      }
+    }
+  };
 
   function modeChoisi() {
     var r = document.querySelector('input[name="mode"]:checked');

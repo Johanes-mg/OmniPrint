@@ -11,6 +11,7 @@ mod plage_pages;
 mod printer;
 mod reseau_utils;
 mod session;
+mod setup;
 mod theme;
 mod web;
 
