@@ -1,4 +1,7 @@
 use std::net::UdpSocket;
+use std::os::windows::process::CommandExt;
+
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 pub fn adresse_ip_locale() -> String {
     let mut candidats: Vec<String> = Vec::new();
@@ -29,6 +32,7 @@ pub fn adresse_ip_locale() -> String {
             "-Command",
             "Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.IPAddress -notlike '169.254.*' -and $_.IPAddress -ne '127.0.0.1' } | Select-Object -ExpandProperty IPAddress",
         ])
+        .creation_flags(CREATE_NO_WINDOW)
         .output()
     {
         if sortie.status.success() {
@@ -58,4 +62,3 @@ fn est_ip_lan(ip: &str) -> bool {
     }
     true
 }
-

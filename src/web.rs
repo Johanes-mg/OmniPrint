@@ -65,6 +65,12 @@ fn traiter(requete: tiny_http::Request, etat: &EtatServeur) {
             return;
         }
     }
+    if methode == Method::Get {
+        if let Some(query) = url.strip_prefix("/apercu?") {
+            let _ = repondre_apercu(requete, etat, query);
+            return;
+        }
+    }
     if methode == Method::Get && url == "/favicon.ico" {
         let _ = requete.respond(Response::empty(StatusCode(204)));
         return;
@@ -385,6 +391,45 @@ fn repondre_statut_doc(requete: tiny_http::Request, etat: &EtatServeur, id: &str
     }
 }
 
+fn repondre_apercu(requete: tiny_http::Request, etat: &EtatServeur, query: &str) -> std::io::Result<()> {
+    let mut id = String::new();
+    let mut page = 1u32;
+    for partie in query.split('&') {
+        let mut it = partie.splitn(2, '=');
+        if let (Some(cle), Some(valeur)) = (it.next(), it.next()) {
+            match cle {
+                "id" => id = valeur.to_string(),
+                "page" => page = valeur.parse().unwrap_or(1),
+                _ => {}
+            }
+        }
+    }
+    if id.is_empty() {
+        return repondre_json_statut(requete, 400, "{\"ok\":false,\"message\":\"ID manquant\"}");
+    }
+    let entree = {
+        let j = etat.journal.lock().unwrap();
+        j.entrees.iter().find(|e| e.id == id).cloned()
+    };
+    let e = match entree {
+        Some(e) => e,
+        None => return repondre_json_statut(requete, 404, "{\"ok\":false,\"message\":\"Document introuvable\"}"),
+    };
+    let chemin = PathBuf::from(&e.message);
+    match crate::printer::generer_apercu(&chemin, page) {
+        Ok(fichier) => {
+            let donnees = std::fs::read(&fichier).unwrap_or_default();
+            let _ = std::fs::remove_file(&fichier);
+            repondre_png(requete, &donnees)
+        }
+        Err(erreur) => repondre_json_statut(
+            requete,
+            500,
+            &format!("{{\"ok\":false,\"message\":\"{}\"}}", echapper_json(&erreur)),
+        ),
+    }
+}
+
 fn extraire_boundary(content_type: &str) -> Option<String> {
     for morceau in content_type.split(';') {
         let m = morceau.trim();
@@ -693,6 +738,9 @@ footer { margin: 36px auto 0; color: var(--texte-doux); font-size: 12px; text-al
     var etat = document.createElement('div');
     etat.className = 'etat';
     etat.textContent = 'Envoi...';
+    var btnApercu = document.createElement('button');
+    btnApercu.textContent = 'Aperçu';
+    btnApercu.disabled = true;
     var btnImp = document.createElement('button');
     btnImp.textContent = 'Imprimer';
     btnImp.disabled = true;
@@ -701,10 +749,11 @@ footer { margin: 36px auto 0; color: var(--texte-doux); font-size: 12px; text-al
     btnSup.textContent = 'Annuler';
     item.appendChild(wrap);
     item.appendChild(etat);
+    item.appendChild(btnApercu);
     item.appendChild(btnImp);
     item.appendChild(btnSup);
     liste.appendChild(item);
-    return { racine: item, etat: etat, btnImp: btnImp, btnSup: btnSup, id: null, pages: 0, pret: false };
+    return { racine: item, etat: etat, btnApercu: btnApercu, btnImp: btnImp, btnSup: btnSup, id: null, pages: 0, pret: false };
   }
 
   function messageErreur(visuel, txt) {
@@ -751,6 +800,7 @@ footer { margin: 36px auto 0; color: var(--texte-doux); font-size: 12px; text-al
             var mot = r.est_feuille ? 'feuille(s)' : 'page(s)';
             visuel.etat.textContent = 'Prêt (' + r.pages + ' ' + mot + ')';
             visuel.btnImp.disabled = false;
+            visuel.btnApercu.disabled = false;
           }
           if (r.statut === 'Imprime') {
             visuel.etat.className = 'etat etat-ok';
@@ -792,6 +842,9 @@ footer { margin: 36px auto 0; color: var(--texte-doux); font-size: 12px; text-al
           visuel.etat.className = 'etat';
           visuel.etat.textContent = 'Analyse du document...';
           suivreStatut(visuel, rep.id);
+          visuel.btnApercu.onclick = function () {
+            window.open('/apercu?id=' + encodeURIComponent(rep.id) + '&page=1', '_blank');
+          };
           visuel.btnImp.onclick = function () {
             visuel.btnImp.disabled = true;
             visuel.btnImp.textContent = 'Impression...';

@@ -52,10 +52,16 @@ pub struct Session {
     pub mode_couleur: ModeCouleur,
     #[serde(default)]
     pub orientation: Orientation,
+    #[serde(default = "nom_partage_defaut")]
+    pub nom_partage: String,
 }
 
 fn mode_sombre_defaut() -> bool {
     true
+}
+
+fn nom_partage_defaut() -> String {
+    config::NOM_PARTAGE_DEFAUT.to_string()
 }
 
 impl Default for Session {
@@ -70,6 +76,7 @@ impl Default for Session {
             mode_sombre: true,
             mode_couleur: ModeCouleur::Couleur,
             orientation: Orientation::Portrait,
+            nom_partage: config::NOM_PARTAGE_DEFAUT.to_string(),
         }
     }
 }

@@ -7,8 +7,7 @@ pub fn publier(port: u16) -> Option<ServiceDaemon> {
     let service_type = "_http._tcp.local.";
     let properties = [("path", "/"), ("version", env!("CARGO_PKG_VERSION"))];
     let ip = crate::reseau_utils::adresse_ip_locale();
-    let info = ServiceInfo::new(service_type, instance, hostname, &ip, port, &properties[..]).ok()?;
+    let info = ServiceInfo::new(service_type, instance, hostname, ip.as_str(), port, &properties[..]).ok()?;
     daemon.register(info).ok()?;
     Some(daemon)
 }
-

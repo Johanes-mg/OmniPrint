@@ -4,6 +4,7 @@ pub const APP_NAME: &str = "OmniPrint";
 pub const DEFAULT_PORT: u16 = 7000;
 pub const PORTS_PROPOSES: [u16; 6] = [7000, 8080, 8888, 9000, 9090, 10000];
 pub const PORT_RECHERCHE_MAX: u16 = 20;
+pub const NOM_PARTAGE_DEFAUT: &str = "OmniPrint";
 
 pub fn dossier_appdata() -> PathBuf {
     if let Ok(appdata) = std::env::var("APPDATA") {

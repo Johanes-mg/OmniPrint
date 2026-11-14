@@ -222,7 +222,7 @@ pub fn bouton_icone(
     reponse.clicked()
 }
 
-pub fn generer_qr(contenu: &str, taille_pixels: u32) -> Option<egui::ColorImage> {
+pub fn generer_qr(contenu: &str) -> Option<egui::ColorImage> {
     let code = qrcode::QrCode::new(contenu.as_bytes()).ok()?;
     let largeur = code.width();
     let cellules = code.to_colors();
@@ -237,6 +237,5 @@ pub fn generer_qr(contenu: &str, taille_pixels: u32) -> Option<egui::ColorImage>
             }
         }
     }
-    let _ = taille_pixels;
     Some(image)
 }
