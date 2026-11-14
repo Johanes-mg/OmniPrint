@@ -71,6 +71,12 @@ fn traiter(requete: tiny_http::Request, etat: &EtatServeur) {
             return;
         }
     }
+    if methode == Method::Get {
+        if let Some(id) = url.strip_prefix("/apercu-total?id=") {
+            let _ = repondre_apercu_total(requete, etat, id);
+            return;
+        }
+    }
     if methode == Method::Get && url == "/favicon.ico" {
         let _ = requete.respond(Response::empty(StatusCode(204)));
         return;
@@ -391,6 +397,25 @@ fn repondre_statut_doc(requete: tiny_http::Request, etat: &EtatServeur, id: &str
     }
 }
 
+fn repondre_apercu_total(requete: tiny_http::Request, etat: &EtatServeur, id: &str) -> std::io::Result<()> {
+    let entree = {
+        let j = etat.journal.lock().unwrap();
+        j.entrees.iter().find(|e| e.id == id).cloned()
+    };
+    match entree {
+        Some(e) => {
+            if e.pages_reelles > 0 {
+                repondre_json_statut(requete, 200, &format!("{{\"ok\":true,\"pages\":{}}}", e.pages_reelles))
+            } else if let Some(err) = e.erreur_pages {
+                repondre_json_statut(requete, 400, &format!("{{\"ok\":false,\"message\":\"{}\"}}", echapper_json(&err)))
+            } else {
+                repondre_json_statut(requete, 202, "{\"ok\":false,\"message\":\"Analyse en cours\"}")
+            }
+        }
+        None => repondre_json_statut(requete, 404, "{\"ok\":false,\"message\":\"Document introuvable\"}"),
+    }
+}
+
 fn repondre_apercu(requete: tiny_http::Request, etat: &EtatServeur, query: &str) -> std::io::Result<()> {
     let mut id = String::new();
     let mut page = 1u32;
@@ -580,36 +605,13 @@ input[type=text], input[type=number], select { width: 100%; padding: 10px 12px; 
 .mode .titre { font-size: 13px; color: var(--texte-doux); margin-bottom: 6px; }
 
 /* Styles des boutons de sélection (cases) */
-.choix-groupe {
-  display: flex;
-  gap: 8px;
-  margin-top: 6px;
-}
-.choix-case {
-  flex: 1;
-  text-align: center;
-  padding: 10px 12px;
-  background: var(--carte);
-  border: 1px solid var(--bordure);
-  border-radius: 8px;
-  font-size: 13px;
-  color: var(--texte);
-  cursor: pointer;
-  user-select: none;
-  transition: all 0.2s ease;
-}
-.choix-case:hover {
-  background: #1f2433;
-}
-.choix-case input {
-  display: none;
-}
-.choix-case.actif {
-  background: var(--accent-fonce);
-  border-color: var(--accent);
-  color: #fff;
-}
+.choix-groupe { display: flex; gap: 8px; margin-top: 6px; }
+.choix-case { flex: 1; text-align: center; padding: 10px 12px; background: var(--carte); border: 1px solid var(--bordure); border-radius: 8px; font-size: 13px; color: var(--texte); cursor: pointer; user-select: none; transition: all 0.2s ease; }
+.choix-case:hover { background: #1f2433; }
+.choix-case input { display: none; }
+.choix-case.actif { background: var(--accent-fonce); border-color: var(--accent); color: #fff; }
 
+/* Styles de la liste et fenêtre d'aperçu */
 .liste { margin-top: 22px; display: flex; flex-direction: column; gap: 10px; text-align: left; }
 .item { display: flex; align-items: center; gap: 12px; padding: 12px 14px; background: var(--carte); border: 1px solid var(--bordure); border-radius: 8px; font-size: 13px; flex-wrap: wrap; }
 .item .nom { flex: 1; min-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -630,6 +632,15 @@ input[type=text], input[type=number], select { width: 100%; padding: 10px 12px; 
 .ligne-double { display: flex; gap: 12px; }
 .ligne-double > div { flex: 1; }
 footer { margin: 36px auto 0; color: var(--texte-doux); font-size: 12px; text-align: center; max-width: 720px; }
+
+/* Modal Aperçu */
+#modal-apercu { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.85); z-index: 1000; overflow-y: auto; padding: 20px; }
+#modal-apercu .contenu { max-width: 800px; margin: 0 auto; background: var(--carte); border: 1px solid var(--bordure); border-radius: 12px; padding: 20px; position: relative; }
+#modal-apercu .btn-fermer { position: absolute; top: 10px; right: 10px; background: var(--erreur); color: #fff; border: none; border-radius: 6px; padding: 6px 12px; cursor: pointer; font-weight: bold; }
+#modal-apercu h3 { margin-top: 0; margin-bottom: 20px; }
+#apercu-pages { display: flex; flex-direction: column; gap: 20px; align-items: center; }
+#apercu-pages img { max-width: 100%; height: auto; box-shadow: 0 4px 12px rgba(0,0,0,0.5); border: 1px solid var(--bordure); }
+#apercu-pages .chargement { color: var(--texte-doux); font-size: 14px; margin: 10px 0; }
 
 @media (max-width: 520px) {
   body { padding: 20px 14px 32px; }
@@ -701,6 +712,16 @@ footer { margin: 36px auto 0; color: var(--texte-doux); font-size: 12px; text-al
 </main>
 <footer>Les documents restent sur le réseau local. Aucune donnée ne quitte l'ordinateur hôte.</footer>
 <input type="file" id="fichier" multiple>
+
+<!-- Fenêtre modale pour l'aperçu global -->
+<div id="modal-apercu">
+  <div class="contenu">
+    <button class="btn-fermer" onclick="fermerApercu()">Fermer</button>
+    <h3>Aperçu du document</h3>
+    <div id="apercu-pages"></div>
+  </div>
+</div>
+
 <script>
 (function () {
   var zone = document.getElementById('zone');
@@ -717,7 +738,6 @@ footer { margin: 36px auto 0; color: var(--texte-doux); font-size: 12px; text-al
   var totalPagesConnues = 0;
   var estFeuilleCourante = false;
 
-  // Met à jour l'apparence des cases cliquables
   window.majCases = function(nomGroupe) {
     var inputs = document.querySelectorAll('input[name="' + nomGroupe + '"]');
     for (var i = 0; i < inputs.length; i++) {
@@ -784,6 +804,43 @@ footer { margin: 36px auto 0; color: var(--texte-doux); font-size: 12px; text-al
       if (inputs[i].checked) arr.push(parseInt(inputs[i].value, 10));
     }
     return arr;
+  }
+
+  // Ouvre la modale et charge toutes les pages
+  function ouvrirApercuGlobal(id) {
+    var modal = document.getElementById('modal-apercu');
+    var conteneur = document.getElementById('apercu-pages');
+    conteneur.innerHTML = '<div class="chargement">Chargement de l\'aperçu complet...</div>';
+    modal.style.display = 'block';
+
+    // Demande le nombre total de pages au serveur
+    var xhr = new XMLHttpRequest();
+    xhr.open('GET', '/apercu-total?id=' + encodeURIComponent(id), true);
+    xhr.onload = function() {
+      var rep = null;
+      try { rep = JSON.parse(xhr.responseText); } catch(e) {}
+      if (xhr.status === 200 && rep && rep.ok && rep.pages > 0) {
+        conteneur.innerHTML = '';
+        for (var p = 1; p <= rep.pages; p++) {
+          var img = document.createElement('img');
+          img.src = '/apercu?id=' + encodeURIComponent(id) + '&page=' + p;
+          img.alt = 'Page ' + p;
+          img.loading = 'lazy'; // Charge les images au fur et à mesure du défilement
+          conteneur.appendChild(img);
+        }
+      } else {
+        conteneur.innerHTML = '<div class="chargement" style="color:var(--erreur)">Impossible de charger l\'aperçu complet.</div>';
+      }
+    };
+    xhr.onerror = function() {
+      conteneur.innerHTML = '<div class="chargement" style="color:var(--erreur)">Erreur réseau.</div>';
+    };
+    xhr.send();
+  }
+
+  window.fermerApercu = function() {
+    document.getElementById('modal-apercu').style.display = 'none';
+    document.getElementById('apercu-pages').innerHTML = '';
   }
 
   function creerItem(fichier) {
@@ -906,9 +963,11 @@ footer { margin: 36px auto 0; color: var(--texte-doux); font-size: 12px; text-al
           visuel.etat.className = 'etat';
           visuel.etat.textContent = 'Analyse du document...';
           suivreStatut(visuel, rep.id);
+          
           visuel.btnApercu.onclick = function () {
-            window.open('/apercu?id=' + encodeURIComponent(rep.id) + '&page=1', '_blank');
+            ouvrirApercuGlobal(rep.id);
           };
+          
           visuel.btnImp.onclick = function () {
             visuel.btnImp.disabled = true;
             visuel.btnImp.textContent = 'Impression...';
